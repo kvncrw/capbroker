@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+
+addr="${CAPBROKER_LISTEN_ADDR:-127.0.0.1:8787}"
+state_dir="${CAPBROKER_STATE_DIR:-$PWD/.state-authority}"
+
+mkdir -p "$state_dir"
+exec ./capbroker serve \
+  --addr "$addr" \
+  --state-dir "$state_dir" \
+  --local-approve

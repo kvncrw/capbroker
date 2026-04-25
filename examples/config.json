@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "defaults": {
+    "approval_timeout_seconds": 120
+  },
+  "secret_sources": {
+    "github_token_from_gh_cli": {
+      "type": "command",
+      "command": [
+        "gh",
+        "auth",
+        "token"
+      ],
+      "hint": "Run gh auth login -h github.com, or change this source to a password manager/GitHub App token command."
+    },
+    "bw_session_file": {
+      "type": "file",
+      "file": "~/.local/state/bw-v/session"
+    },
+    "openrouter_from_bw": {
+      "type": "command",
+      "command": [
+        "bw",
+        "get",
+        "password",
+        "OPENROUTER_API_KEY"
+      ]
+    },
+    "kubeconfig_from_bws": {
+      "type": "provider",
+      "provider": "bws",
+      "ref": "00000000-0000-0000-0000-000000000000",
+      "field": "value",
+      "hint": "Replace ref with a BWS secret ID containing a read-only kubeconfig."
+    }
+  },
+  "secret_providers": {
+    "bws": {
+      "type": "command",
+      "command": [
+        "capbroker-provider-bws"
+      ]
+    }
+  },
+  "profiles": {
+    "github-review": {
+      "description": "Review PRs and post reviews in a repo namespace.",
+      "agents": [
+        "remote-agent",
+        "codex",
+        "claude",
+        "opencode"
+      ],
+      "resources": [
+        "example-org/*"
+      ],
+      "ttl_seconds": 900,
+      "require_approval": true,
+      "allowed_commands": [
+        [
+          "gh",
+          "pr",
+          "view"
+        ],
+        [
+          "gh",
+          "pr",
+          "diff"
+        ],
+        [
+          "gh",
+          "pr",
+          "review"
+        ],
+        [
+          "git",
+          "fetch"
+        ],
+        [
+          "git",
+          "clone"
+        ],
+        [
+          "git",
+          "push"
+        ]
+      ],
+      "env": {
+        "GH_TOKEN": "github_token_from_gh_cli"
+      }
+    },
+    "k8s-read-example": {
+      "description": "Read-only inspection of an application namespace.",
+      "agents": [
+        "remote-agent",
+        "codex",
+        "claude",
+        "opencode"
+      ],
+      "resources": [
+        "namespace/example-app"
+      ],
+      "ttl_seconds": 600,
+      "require_approval": true,
+      "allowed_commands": [
+        [
+          "kubectl",
+          "-n",
+          "example-app",
+          "get"
+        ],
+        [
+          "kubectl",
+          "-n",
+          "example-app",
+          "describe"
+        ],
+        [
+          "kubectl",
+          "-n",
+          "example-app",
+          "logs"
+        ]
+      ],
+      "files": {
+        "KUBECONFIG": "kubeconfig_from_bws"
+      }
+    }
+  }
+}

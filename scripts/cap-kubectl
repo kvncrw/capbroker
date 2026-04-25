@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+set -eu
+
+namespace=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-n" ] || [ "$prev" = "--namespace" ]; then
+    namespace="$arg"
+    break
+  fi
+  case "$arg" in
+    -n=*) namespace="${arg#-n=}" ;;
+    --namespace=*) namespace="${arg#--namespace=}" ;;
+  esac
+  prev="$arg"
+done
+
+if [ -z "$namespace" ]; then
+  namespace="${CAPBROKER_KUBECTL_NAMESPACE:-default}"
+fi
+
+reason="${CAPBROKER_REASON:-kubernetes $*}"
+exec capbroker remote-run \
+  --agent "${CAPBROKER_AGENT:-remote-agent}" \
+  --profile "${CAPBROKER_PROFILE:-k8s-read}" \
+  --resource "namespace/$namespace" \
+  --reason "$reason" \
+  -- kubectl "$@"
