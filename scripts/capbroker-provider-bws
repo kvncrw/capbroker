@@ -1,0 +1,36 @@
+#!/usr/bin/env sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+request_json=$(cat)
+
+ref=$(printf '%s' "$request_json" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("ref") or "").strip())')
+field=$(printf '%s' "$request_json" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("field") or "value").strip())')
+
+if [ -z "$ref" ]; then
+  echo "provider request missing ref" >&2
+  exit 2
+fi
+
+secret_json=$(bws secret get "$ref" -o json)
+
+printf '%s' "$secret_json" | FIELD="$field" python3 -c '
+import json
+import os
+import sys
+
+data = json.load(sys.stdin)
+field = os.environ.get("FIELD") or "value"
+value = data
+for part in field.split("."):
+    if not part:
+        continue
+    if isinstance(value, dict) and part in value:
+        value = value[part]
+    else:
+        raise SystemExit(f"field {field!r} not found")
+if isinstance(value, (dict, list)):
+    print(json.dumps(value, separators=(",", ":")))
+else:
+    print(value)
+'

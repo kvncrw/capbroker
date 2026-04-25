@@ -1,0 +1,29 @@
+#!/usr/bin/env sh
+set -eu
+
+repo=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--repo" ] || [ "$prev" = "-R" ]; then
+    repo="$arg"
+    break
+  fi
+  case "$arg" in
+    --repo=*) repo="${arg#--repo=}" ;;
+    -R=*) repo="${arg#-R=}" ;;
+  esac
+  prev="$arg"
+done
+
+if [ -z "$repo" ]; then
+  echo "cap-gh requires --repo OWNER/REPO or -R OWNER/REPO" >&2
+  exit 2
+fi
+
+reason="${CAPBROKER_REASON:-github $*}"
+exec capbroker remote-run \
+  --agent "${CAPBROKER_AGENT:-remote-agent}" \
+  --profile "${CAPBROKER_PROFILE:-github-review}" \
+  --resource "$repo" \
+  --reason "$reason" \
+  -- gh "$@"
