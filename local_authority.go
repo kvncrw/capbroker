@@ -14,7 +14,20 @@ func (s *capbrokerServer) localDecideRequest(remoteReq RemoteRequest) {
 		s.localDeny(remoteReq.ID, "local policy denied: "+err.Error())
 		return
 	}
-	approved, err := promptApproval(req, profile, time.Duration(s.cfg.Defaults.ApprovalTimeoutSeconds)*time.Second)
+	sessionTTL := requestedSessionTTL(s.cfg, profile, req)
+	critical := requestIsCritical(profile, req)
+	if !critical {
+		grant, err := activeGrant(s.stateDir, req, time.Now())
+		if err != nil {
+			s.localDeny(remoteReq.ID, "operator session lookup failed: "+err.Error())
+			return
+		}
+		if grant != nil {
+			s.localApproveRequest(remoteReq, profile, "approved by active operator session "+grant.ID)
+			return
+		}
+	}
+	approved, err := promptApproval(req, profile, sessionTTL, critical, time.Duration(s.cfg.Defaults.ApprovalTimeoutSeconds)*time.Second)
 	if err != nil {
 		s.localDeny(remoteReq.ID, "local approval failed: "+err.Error())
 		return
@@ -23,6 +36,16 @@ func (s *capbrokerServer) localDecideRequest(remoteReq RemoteRequest) {
 		s.localDeny(remoteReq.ID, "denied by local approver")
 		return
 	}
+	if !critical {
+		if _, err := createGrant(s.stateDir, req, sessionTTL, time.Now()); err != nil {
+			s.localDeny(remoteReq.ID, "operator session creation failed: "+err.Error())
+			return
+		}
+	}
+	s.localApproveRequest(remoteReq, profile, "approved by local authority")
+}
+
+func (s *capbrokerServer) localApproveRequest(remoteReq RemoteRequest, profile Profile, message string) {
 	secrets, err := resolveProfileSecrets(s.cfg, profile)
 	if err != nil {
 		s.localDeny(remoteReq.ID, "secret resolution failed: "+err.Error())
@@ -48,7 +71,7 @@ func (s *capbrokerServer) localDecideRequest(remoteReq RemoteRequest) {
 			return fmt.Errorf("request is already %s", req.Status)
 		}
 		req.Status = remoteStatusApproved
-		req.Message = "approved by local authority"
+		req.Message = message
 		req.EncryptedLease = lease
 		req.LeaseExpiresAt = &expiresAt
 		req.UpdatedAt = time.Now().UTC()
@@ -69,7 +92,7 @@ func (s *capbrokerServer) localDecideRequest(remoteReq RemoteRequest) {
 		RequestHash: requestHash(updated.Request()),
 		GrantID:     updated.ID,
 		Approved:    &approvedEvent,
-		Message:     "approved by local authority",
+		Message:     message,
 	})
 }
 

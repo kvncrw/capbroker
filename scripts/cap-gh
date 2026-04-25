@@ -21,9 +21,15 @@ if [ -z "$repo" ]; then
 fi
 
 reason="${CAPBROKER_REASON:-github $*}"
+ttl_args=""
+if [ -n "${CAPBROKER_SESSION_TTL:-}" ]; then
+  ttl_args="--session-ttl ${CAPBROKER_SESSION_TTL}"
+fi
+# shellcheck disable=SC2086
 exec capbroker remote-run \
   --agent "${CAPBROKER_AGENT:-remote-agent}" \
   --profile "${CAPBROKER_PROFILE:-github-review}" \
   --resource "$repo" \
   --reason "$reason" \
+  $ttl_args \
   -- gh "$@"

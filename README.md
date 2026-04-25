@@ -37,6 +37,23 @@ Override with `CAPBROKER_CONFIG` and `CAPBROKER_STATE_DIR`.
 
 ## Workflow
 
+Start an operator session when you are present and want the agent to keep
+working without repeated prompts:
+
+```bash
+capbroker session start \
+  --agent remote-agent \
+  --profile github-review \
+  --resource example-org/example-repo \
+  --ttl 45m \
+  --reason "operator present: review and update repo"
+```
+
+For the session TTL, capbroker silently caps the requested value at
+`defaults.max_session_seconds`, which defaults to 3 hours. Non-critical commands
+inside the same `agent + profile + resource` scope reuse the session. Commands
+matching `critical_commands` still require an explicit one-command approval.
+
 Run a GitHub command through a profile:
 
 ```bash
@@ -73,9 +90,9 @@ capbroker request \
 List and revoke grants:
 
 ```bash
-capbroker grants
-capbroker revoke --id cap_...
-capbroker revoke --all
+capbroker session list
+capbroker session revoke --id cap_...
+capbroker session revoke --all
 ```
 
 Run through a remote approval authority:
@@ -116,6 +133,7 @@ decision.
       "ttl_seconds": 900,
       "require_approval": true,
       "allowed_commands": [["gh", "pr", "view"], ["gh", "pr", "review"]],
+      "critical_commands": [["gh", "repo", "delete"]],
       "env": {
         "GH_TOKEN": "github_token_from_gh_cli"
       }

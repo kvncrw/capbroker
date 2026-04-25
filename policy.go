@@ -8,11 +8,12 @@ import (
 )
 
 type Request struct {
-	Agent    string   `json:"agent"`
-	Profile  string   `json:"profile"`
-	Resource string   `json:"resource"`
-	Reason   string   `json:"reason"`
-	Command  []string `json:"command,omitempty"`
+	Agent             string   `json:"agent"`
+	Profile           string   `json:"profile"`
+	Resource          string   `json:"resource"`
+	Reason            string   `json:"reason"`
+	Command           []string `json:"command,omitempty"`
+	SessionTTLSeconds int      `json:"session_ttl_seconds,omitempty"`
 }
 
 func (c *Config) validateRequest(req Request, needsCommand bool) (Profile, error) {
@@ -75,4 +76,12 @@ func commandAllowed(prefixes [][]string, command []string) bool {
 		}
 	}
 	return false
+}
+
+func commandCritical(prefixes [][]string, command []string) bool {
+	return commandAllowed(prefixes, command)
+}
+
+func requestIsCritical(profile Profile, req Request) bool {
+	return len(req.Command) > 0 && commandCritical(profile.CriticalCommands, req.Command)
 }

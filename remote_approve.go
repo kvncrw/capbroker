@@ -43,20 +43,50 @@ func approvePendingOnce(cfg *Config, server string, keyFile ApproverKeyFile, pri
 			}
 			continue
 		}
-		approved, err := promptApproval(req, profile, time.Duration(cfg.Defaults.ApprovalTimeoutSeconds)*time.Second)
-		if err != nil {
-			return err
-		}
-		if !approved {
-			decision := signDecision(remoteReq.ID, RemoteDecision{
-				Approved: false,
-				Approver: keyFile.Name,
-				Message:  "denied by local approver",
-			}, privateKey)
-			if err := postDecision(server, remoteReq.ID, decision); err != nil {
+		sessionTTL := requestedSessionTTL(cfg, profile, req)
+		critical := requestIsCritical(profile, req)
+		stateDir := defaultStateDir()
+		if !critical {
+			grant, err := activeGrant(stateDir, req, time.Now())
+			if err != nil {
 				return err
 			}
-			continue
+			if grant == nil {
+				approved, err := promptApproval(req, profile, sessionTTL, critical, time.Duration(cfg.Defaults.ApprovalTimeoutSeconds)*time.Second)
+				if err != nil {
+					return err
+				}
+				if !approved {
+					decision := signDecision(remoteReq.ID, RemoteDecision{
+						Approved: false,
+						Approver: keyFile.Name,
+						Message:  "denied by local approver",
+					}, privateKey)
+					if err := postDecision(server, remoteReq.ID, decision); err != nil {
+						return err
+					}
+					continue
+				}
+				if _, err := createGrant(stateDir, req, sessionTTL, time.Now()); err != nil {
+					return err
+				}
+			}
+		} else {
+			approved, err := promptApproval(req, profile, sessionTTL, critical, time.Duration(cfg.Defaults.ApprovalTimeoutSeconds)*time.Second)
+			if err != nil {
+				return err
+			}
+			if !approved {
+				decision := signDecision(remoteReq.ID, RemoteDecision{
+					Approved: false,
+					Approver: keyFile.Name,
+					Message:  "denied by local approver",
+				}, privateKey)
+				if err := postDecision(server, remoteReq.ID, decision); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		secrets, err := resolveProfileSecrets(cfg, profile)
 		if err != nil {

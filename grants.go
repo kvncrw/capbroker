@@ -20,6 +20,7 @@ type Grant struct {
 	Resource    string    `json:"resource"`
 	Reason      string    `json:"reason"`
 	RequestHash string    `json:"request_hash"`
+	Kind        string    `json:"kind,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	ExpiresAt   time.Time `json:"expires_at"`
 }
@@ -51,6 +52,7 @@ func createGrant(stateDir string, req Request, ttl time.Duration, now time.Time)
 		Resource:    req.Resource,
 		Reason:      req.Reason,
 		RequestHash: requestHash(req),
+		Kind:        "operator_session",
 		CreatedAt:   now.UTC(),
 		ExpiresAt:   now.Add(ttl).UTC(),
 	}
@@ -60,6 +62,20 @@ func createGrant(stateDir string, req Request, ttl time.Duration, now time.Time)
 	}
 	grants = append(grants, grant)
 	return grant, saveGrants(stateDir, pruneExpired(grants, now))
+}
+
+func ephemeralGrant(req Request, ttl time.Duration, now time.Time, kind string) Grant {
+	return Grant{
+		ID:          kind + "_" + randomHex(8),
+		Agent:       req.Agent,
+		Profile:     req.Profile,
+		Resource:    req.Resource,
+		Reason:      req.Reason,
+		RequestHash: requestHash(req),
+		Kind:        kind,
+		CreatedAt:   now.UTC(),
+		ExpiresAt:   now.Add(ttl).UTC(),
+	}
 }
 
 func loadGrants(stateDir string) ([]Grant, error) {

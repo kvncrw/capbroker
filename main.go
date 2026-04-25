@@ -22,6 +22,8 @@ func main() {
 		cmdKeygen(os.Args[2:])
 	case "request":
 		cmdRequest(os.Args[2:])
+	case "session":
+		cmdSession(os.Args[2:])
 	case "run":
 		cmdRun(os.Args[2:])
 	case "remote-run":
@@ -115,9 +117,18 @@ func cmdRequest(args []string) {
 	profileName := fs.String("profile", "", "policy profile")
 	resource := fs.String("resource", "", "resource identifier")
 	reason := fs.String("reason", "", "approval reason")
+	ttlValue := fs.String("ttl", "", "requested operator session TTL, e.g. 30m")
 	_ = fs.Parse(args)
 	cfg := mustLoadConfig(*configPath)
-	req := Request{Agent: *agent, Profile: *profileName, Resource: *resource, Reason: *reason}
+	ttl, err := parseSessionTTL(*ttlValue)
+	die(err)
+	req := Request{
+		Agent:             *agent,
+		Profile:           *profileName,
+		Resource:          *resource,
+		Reason:            *reason,
+		SessionTTLSeconds: durationSeconds(ttl),
+	}
 	profile, err := cfg.validateRequest(req, false)
 	die(err)
 	stateDir := defaultStateDir()
@@ -136,6 +147,97 @@ func cmdRequest(args []string) {
 	printJSON(grant)
 }
 
+func cmdSession(args []string) {
+	if len(args) == 0 {
+		die(fmt.Errorf("session requires start, list, or revoke"))
+	}
+	switch args[0] {
+	case "start":
+		cmdSessionStart(args[1:])
+	case "list":
+		cmdSessionList(args[1:])
+	case "revoke":
+		cmdSessionRevoke(args[1:])
+	default:
+		die(fmt.Errorf("unknown session command %q", args[0]))
+	}
+}
+
+func cmdSessionStart(args []string) {
+	fs := flag.NewFlagSet("session start", flag.ExitOnError)
+	configPath := fs.String("config", "", "config path")
+	stateDir := fs.String("state-dir", "", "state directory")
+	agent := fs.String("agent", "unknown", "agent name")
+	profileName := fs.String("profile", "", "policy profile")
+	resource := fs.String("resource", "", "resource identifier")
+	reason := fs.String("reason", "", "operator session reason")
+	ttlValue := fs.String("ttl", "", "operator session TTL, e.g. 30m; capped by config")
+	_ = fs.Parse(args)
+	cfg := mustLoadConfig(*configPath)
+	ttl, err := parseSessionTTL(*ttlValue)
+	die(err)
+	req := Request{
+		Agent:             *agent,
+		Profile:           *profileName,
+		Resource:          *resource,
+		Reason:            *reason,
+		SessionTTLSeconds: durationSeconds(ttl),
+	}
+	profile, err := cfg.validateRequest(req, false)
+	die(err)
+	dir := *stateDir
+	if dir == "" {
+		dir = defaultStateDir()
+	}
+	sessionTTL := requestedSessionTTL(cfg, profile, req)
+	grant, err := createGrant(dir, req, sessionTTL, time.Now())
+	die(err)
+	_ = appendAudit(dir, AuditEvent{
+		Event:       "operator_session_started",
+		Agent:       req.Agent,
+		Profile:     req.Profile,
+		Resource:    req.Resource,
+		Reason:      req.Reason,
+		GrantID:     grant.ID,
+		RequestHash: requestHash(req),
+		Message:     fmt.Sprintf("operator session active for %s", sessionTTL.Round(time.Second)),
+	})
+	printJSON(grant)
+}
+
+func cmdSessionList(args []string) {
+	fs := flag.NewFlagSet("session list", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "state directory")
+	activeOnly := fs.Bool("active", true, "show active sessions only")
+	_ = fs.Parse(args)
+	dir := *stateDir
+	if dir == "" {
+		dir = defaultStateDir()
+	}
+	grants, err := loadGrants(dir)
+	die(err)
+	if *activeOnly {
+		grants = pruneExpired(grants, time.Now())
+	}
+	printJSON(grants)
+}
+
+func cmdSessionRevoke(args []string) {
+	fs := flag.NewFlagSet("session revoke", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "state directory")
+	id := fs.String("id", "", "session id")
+	all := fs.Bool("all", false, "revoke all sessions")
+	_ = fs.Parse(args)
+	if !*all && *id == "" {
+		die(fmt.Errorf("session revoke requires --id or --all"))
+	}
+	dir := *stateDir
+	if dir == "" {
+		dir = defaultStateDir()
+	}
+	die(revokeGrants(dir, *id, *all))
+}
+
 func cmdRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	configPath := fs.String("config", "", "config path")
@@ -143,10 +245,20 @@ func cmdRun(args []string) {
 	profileName := fs.String("profile", "", "policy profile")
 	resource := fs.String("resource", "", "resource identifier")
 	reason := fs.String("reason", "", "approval reason")
+	ttlValue := fs.String("session-ttl", "", "requested operator session TTL, e.g. 30m")
 	_ = fs.Parse(args)
 	command := fs.Args()
 	cfg := mustLoadConfig(*configPath)
-	req := Request{Agent: *agent, Profile: *profileName, Resource: *resource, Reason: *reason, Command: command}
+	ttl, err := parseSessionTTL(*ttlValue)
+	die(err)
+	req := Request{
+		Agent:             *agent,
+		Profile:           *profileName,
+		Resource:          *resource,
+		Reason:            *reason,
+		Command:           command,
+		SessionTTLSeconds: durationSeconds(ttl),
+	}
 	profile, err := cfg.validateRequest(req, true)
 	die(err)
 	os.Exit(runScopedCommand(cfg, defaultStateDir(), req, profile))
@@ -159,11 +271,21 @@ func cmdRemoteRun(args []string) {
 	profileName := fs.String("profile", "", "policy profile")
 	resource := fs.String("resource", "", "resource identifier")
 	reason := fs.String("reason", "", "approval reason")
+	ttlValue := fs.String("session-ttl", "", "requested operator session TTL, e.g. 30m")
 	wait := fs.Duration("wait", 5*time.Minute, "approval wait timeout")
 	interval := fs.Duration("interval", 2*time.Second, "approval poll interval")
 	_ = fs.Parse(args)
 	command := fs.Args()
-	req := Request{Agent: *agent, Profile: *profileName, Resource: *resource, Reason: *reason, Command: command}
+	ttl, err := parseSessionTTL(*ttlValue)
+	die(err)
+	req := Request{
+		Agent:             *agent,
+		Profile:           *profileName,
+		Resource:          *resource,
+		Reason:            *reason,
+		Command:           command,
+		SessionTTLSeconds: durationSeconds(ttl),
+	}
 	os.Exit(runRemoteCommand(*server, req, *wait, *interval))
 }
 
@@ -228,6 +350,9 @@ Commands:
   capbroker keygen --name NAME [--out PATH]
   capbroker doctor [--profile PROFILE]
   capbroker request --agent AGENT --profile PROFILE --resource RESOURCE [--reason TEXT]
+  capbroker session start --agent AGENT --profile PROFILE --resource RESOURCE [--ttl 30m] [--reason TEXT]
+  capbroker session list
+  capbroker session revoke --id SESSION_ID | --all
   capbroker run --agent AGENT --profile PROFILE --resource RESOURCE [--reason TEXT] -- COMMAND [ARGS...]
   capbroker serve [--addr ADDR] [--state-dir PATH]
   capbroker approve --server URL --key PATH [--watch]

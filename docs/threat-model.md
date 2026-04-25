@@ -22,8 +22,10 @@ auditable.
 ## Properties In This Prototype
 
 - Deny by default unless a policy profile allows the agent/resource/command.
-- Approval grants are scoped to `agent + profile + resource`.
-- Grants expire after profile TTL and can be revoked.
+- Operator sessions are scoped to `agent + profile + resource`.
+- Operator sessions expire after their capped TTL and can be revoked.
+- Commands matching `critical_commands` bypass implicit sessions and require
+  explicit one-command approval.
 - Secrets are resolved only after policy and approval pass.
 - Secrets are injected as child-process environment variables or materialized as
   temporary `0600` files whose paths are exposed through environment variables.

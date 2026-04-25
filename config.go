@@ -23,18 +23,21 @@ type Config struct {
 
 type Defaults struct {
 	ApprovalTimeoutSeconds int `json:"approval_timeout_seconds"`
+	MaxSessionSeconds      int `json:"max_session_seconds,omitempty"`
 }
 
 type Profile struct {
-	Description     string            `json:"description"`
-	Agents          []string          `json:"agents"`
-	Resources       []string          `json:"resources"`
-	TTLSeconds      int               `json:"ttl_seconds"`
-	RequireApproval bool              `json:"require_approval"`
-	AllowedCommands [][]string        `json:"allowed_commands"`
-	Env             map[string]string `json:"env"`
-	Files           map[string]string `json:"files,omitempty"`
-	Metadata        map[string]string `json:"metadata"`
+	Description       string            `json:"description"`
+	Agents            []string          `json:"agents"`
+	Resources         []string          `json:"resources"`
+	TTLSeconds        int               `json:"ttl_seconds"`
+	MaxSessionSeconds int               `json:"max_session_seconds,omitempty"`
+	RequireApproval   bool              `json:"require_approval"`
+	AllowedCommands   [][]string        `json:"allowed_commands"`
+	CriticalCommands  [][]string        `json:"critical_commands,omitempty"`
+	Env               map[string]string `json:"env"`
+	Files             map[string]string `json:"files,omitempty"`
+	Metadata          map[string]string `json:"metadata"`
 }
 
 type SecretSource struct {
@@ -86,6 +89,9 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.Defaults.ApprovalTimeoutSeconds <= 0 {
 		cfg.Defaults.ApprovalTimeoutSeconds = 120
 	}
+	if cfg.Defaults.MaxSessionSeconds <= 0 {
+		cfg.Defaults.MaxSessionSeconds = 3 * 60 * 60
+	}
 	return &cfg, nil
 }
 
@@ -136,7 +142,8 @@ func homeDir() string {
 const defaultConfigJSON = `{
   "version": 1,
   "defaults": {
-    "approval_timeout_seconds": 120
+    "approval_timeout_seconds": 120,
+    "max_session_seconds": 10800
   },
   "secret_sources": {
     "github_token_from_gh_cli": {
@@ -173,6 +180,10 @@ const defaultConfigJSON = `{
         ["git", "clone"],
         ["git", "push"]
       ],
+      "critical_commands": [
+        ["gh", "repo", "delete"],
+        ["git", "push", "--force"]
+      ],
       "env": {
         "GH_TOKEN": "github_token_from_gh_cli"
       }
@@ -187,6 +198,11 @@ const defaultConfigJSON = `{
         ["kubectl", "get"],
         ["kubectl", "describe"],
         ["kubectl", "logs"]
+      ],
+      "critical_commands": [
+        ["kubectl", "delete"],
+        ["kubectl", "apply"],
+        ["kubectl", "patch"]
       ],
       "files": {
         "KUBECONFIG": "kubeconfig_from_provider"

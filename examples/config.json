@@ -1,7 +1,8 @@
 {
   "version": 1,
   "defaults": {
-    "approval_timeout_seconds": 120
+    "approval_timeout_seconds": 120,
+    "max_session_seconds": 10800
   },
   "secret_sources": {
     "github_token_from_gh_cli": {
@@ -85,6 +86,18 @@
           "push"
         ]
       ],
+      "critical_commands": [
+        [
+          "gh",
+          "repo",
+          "delete"
+        ],
+        [
+          "git",
+          "push",
+          "--force"
+        ]
+      ],
       "env": {
         "GH_TOKEN": "github_token_from_gh_cli"
       }
@@ -120,6 +133,26 @@
           "-n",
           "example-app",
           "logs"
+        ]
+      ],
+      "critical_commands": [
+        [
+          "kubectl",
+          "-n",
+          "example-app",
+          "delete"
+        ],
+        [
+          "kubectl",
+          "-n",
+          "example-app",
+          "apply"
+        ],
+        [
+          "kubectl",
+          "-n",
+          "example-app",
+          "patch"
         ]
       ],
       "files": {

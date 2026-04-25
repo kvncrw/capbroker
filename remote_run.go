@@ -24,12 +24,13 @@ func runRemoteCommand(server string, req Request, waitTimeout, pollInterval time
 	}
 	var created RemoteRequest
 	if err := postJSON(remoteURL(server, "/v1/requests"), RemoteRequestCreate{
-		Agent:           req.Agent,
-		Profile:         req.Profile,
-		Resource:        req.Resource,
-		Reason:          req.Reason,
-		Command:         req.Command,
-		ClientPublicKey: publicKey,
+		Agent:             req.Agent,
+		Profile:           req.Profile,
+		Resource:          req.Resource,
+		Reason:            req.Reason,
+		Command:           req.Command,
+		SessionTTLSeconds: req.SessionTTLSeconds,
+		ClientPublicKey:   publicKey,
 	}, &created); err != nil {
 		fmt.Fprintln(os.Stderr, "capbroker:", err)
 		return 1

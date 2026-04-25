@@ -50,11 +50,12 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	req := Request{
-		Agent:    create.Agent,
-		Profile:  create.Profile,
-		Resource: create.Resource,
-		Reason:   create.Reason,
-		Command:  create.Command,
+		Agent:             create.Agent,
+		Profile:           create.Profile,
+		Resource:          create.Resource,
+		Reason:            create.Reason,
+		Command:           create.Command,
+		SessionTTLSeconds: create.SessionTTLSeconds,
 	}
 	if _, err := s.cfg.validateRequest(req, true); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
@@ -66,16 +67,17 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 	}
 	now := time.Now().UTC()
 	remoteReq := RemoteRequest{
-		ID:              "req_" + randomHex(16),
-		Agent:           create.Agent,
-		Profile:         create.Profile,
-		Resource:        create.Resource,
-		Reason:          create.Reason,
-		Command:         create.Command,
-		ClientPublicKey: create.ClientPublicKey,
-		Status:          remoteStatusPending,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:                "req_" + randomHex(16),
+		Agent:             create.Agent,
+		Profile:           create.Profile,
+		Resource:          create.Resource,
+		Reason:            create.Reason,
+		Command:           create.Command,
+		SessionTTLSeconds: create.SessionTTLSeconds,
+		ClientPublicKey:   create.ClientPublicKey,
+		Status:            remoteStatusPending,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	remoteReq, err := s.store.create(remoteReq)
 	if err != nil {

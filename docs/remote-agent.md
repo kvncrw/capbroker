@@ -44,6 +44,22 @@ Override the address for a private LAN, tailnet, or mTLS-protected ingress:
 CAPBROKER_LISTEN_ADDR=10.0.0.10:8787 ./scripts/run-authority
 ```
 
+To avoid repeated prompts while the operator is present, start an operator
+session on the authority host:
+
+```bash
+capbroker session start \
+  --agent remote-agent \
+  --profile github-review \
+  --resource example-org/example-repo \
+  --ttl 45m \
+  --reason "operator present: allow repo maintenance"
+```
+
+Remote requests for non-critical commands in that `agent + profile + resource`
+scope reuse the session until it expires. Destructive or otherwise sensitive
+prefixes listed under `critical_commands` still prompt per command.
+
 The authority config at `~/.config/capbroker/config.json` can resolve the
 GitHub profile token with:
 
@@ -126,6 +142,7 @@ capbroker remote-run \
   --agent remote-agent \
   --profile github-review \
   --resource OWNER/REPO \
+  --session-ttl 45m \
   -- gh ...
 ```
 

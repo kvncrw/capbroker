@@ -13,17 +13,21 @@ import (
 
 func ensureApproved(cfg *Config, stateDir string, req Request, profile Profile) (Grant, bool, error) {
 	now := time.Now()
+	sessionTTL := requestedSessionTTL(cfg, profile, req)
+	critical := requestIsCritical(profile, req)
 	if !profile.RequireApproval {
-		grant, err := createGrant(stateDir, req, time.Duration(profile.TTLSeconds)*time.Second, now)
+		grant, err := createGrant(stateDir, req, sessionTTL, now)
 		return grant, true, err
 	}
-	if grant, err := activeGrant(stateDir, req, now); err != nil {
-		return Grant{}, false, err
-	} else if grant != nil {
-		return *grant, false, nil
+	if !critical {
+		if grant, err := activeGrant(stateDir, req, now); err != nil {
+			return Grant{}, false, err
+		} else if grant != nil {
+			return *grant, false, nil
+		}
 	}
 
-	approved, err := promptApproval(req, profile, time.Duration(cfg.Defaults.ApprovalTimeoutSeconds)*time.Second)
+	approved, err := promptApproval(req, profile, sessionTTL, critical, time.Duration(cfg.Defaults.ApprovalTimeoutSeconds)*time.Second)
 	if err != nil {
 		return Grant{}, false, err
 	}
@@ -43,15 +47,18 @@ func ensureApproved(cfg *Config, stateDir string, req Request, profile Profile) 
 	if !approved {
 		return Grant{}, false, fmt.Errorf("approval denied")
 	}
-	grant, err := createGrant(stateDir, req, time.Duration(profile.TTLSeconds)*time.Second, now)
+	if critical {
+		return ephemeralGrant(req, sessionTTL, now, "critical_approval"), true, nil
+	}
+	grant, err := createGrant(stateDir, req, sessionTTL, now)
 	return grant, true, err
 }
 
-func promptApproval(req Request, profile Profile, timeout time.Duration) (bool, error) {
+func promptApproval(req Request, profile Profile, sessionTTL time.Duration, critical bool, timeout time.Duration) (bool, error) {
 	if os.Getenv("CAPBROKER_AUTO_APPROVE") == "1" {
 		return true, nil
 	}
-	text := approvalText(req, profile)
+	text := approvalText(req, profile, sessionTTL, critical)
 	if commandExists("zenity") && displayAvailable() {
 		args := []string{
 			"--question",
@@ -82,17 +89,22 @@ func promptApproval(req Request, profile Profile, timeout time.Duration) (bool, 
 	return line == "y" || line == "yes", nil
 }
 
-func approvalText(req Request, profile Profile) string {
+func approvalText(req Request, profile Profile, sessionTTL time.Duration, critical bool) string {
 	command := "(none)"
 	if len(req.Command) > 0 {
 		command = strings.Join(req.Command, " ")
 	}
+	scope := "operator session"
+	if critical {
+		scope = "critical one-command approval"
+	}
 	return fmt.Sprintf(
-		"Agent: %s\nProfile: %s\nResource: %s\nTTL: %ds\nReason: %s\nCommand: %s\n\nApprove this local capability grant?",
+		"Agent: %s\nProfile: %s\nResource: %s\nApproval: %s\nSession TTL: %s\nReason: %s\nCommand: %s\n\nApprove this capability?",
 		req.Agent,
 		req.Profile,
 		req.Resource,
-		profile.TTLSeconds,
+		scope,
+		sessionTTL.Round(time.Second),
 		req.Reason,
 		command,
 	)
