@@ -1,6 +1,17 @@
 #!/usr/bin/env sh
 set -eu
 
+server_file="${CAPBROKER_SERVER_FILE:-/opt/data/capbroker-server}"
+if [ -z "${CAPBROKER_SERVER:-}" ] && [ -f "$server_file" ]; then
+  CAPBROKER_SERVER="$(sed -n '1p' "$server_file")"
+  export CAPBROKER_SERVER
+fi
+
+if [ -z "${CAPBROKER_SERVER:-}" ]; then
+  echo "cap-gh requires CAPBROKER_SERVER or $server_file" >&2
+  exit 2
+fi
+
 repo=""
 prev=""
 for arg in "$@"; do
