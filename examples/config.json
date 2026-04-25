@@ -48,6 +48,7 @@
       "description": "Review PRs and post reviews in a repo namespace.",
       "agents": [
         "remote-agent",
+        "hermes",
         "codex",
         "claude",
         "opencode"
@@ -106,6 +107,7 @@
       "description": "Read-only inspection of an application namespace.",
       "agents": [
         "remote-agent",
+        "hermes",
         "codex",
         "claude",
         "opencode"

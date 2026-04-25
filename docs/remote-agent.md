@@ -49,7 +49,7 @@ session on the authority host:
 
 ```bash
 capbroker session start \
-  --agent remote-agent \
+  --agent hermes \
   --profile github-review \
   --resource example-org/example-repo \
   --ttl 45m \
@@ -123,6 +123,7 @@ The remote agent image or runtime needs:
 - the command-line tools used by approved profiles, such as `gh` or `kubectl`
 - wrapper scripts such as `cap-gh` or `cap-kubectl`, if desired
 - `CAPBROKER_SERVER=http://10.0.0.10:8787`
+- `CAPBROKER_AGENT=hermes` or another policy-approved agent name
 - the directory containing these tools at the front of `PATH`
 
 Use:

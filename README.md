@@ -42,7 +42,7 @@ working without repeated prompts:
 
 ```bash
 capbroker session start \
-  --agent remote-agent \
+  --agent hermes \
   --profile github-review \
   --resource example-org/example-repo \
   --ttl 45m \
@@ -105,7 +105,7 @@ From a remote agent host:
 
 ```bash
 capbroker remote-run \
-  --agent remote-agent \
+  --agent hermes \
   --profile github-review \
   --resource example-org/example-repo \
   --reason "review PR 142" \
@@ -128,7 +128,7 @@ decision.
 {
   "profiles": {
     "github-review": {
-      "agents": ["remote-agent", "codex"],
+      "agents": ["remote-agent", "hermes", "codex"],
       "resources": ["example-org/*"],
       "ttl_seconds": 900,
       "require_approval": true,
