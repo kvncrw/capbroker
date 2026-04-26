@@ -11,18 +11,25 @@ import (
 	"time"
 )
 
-// MaxAutoApproveTTL is a hard cap on how long the on-disk auto-approve
-// lease can be. Anything longer is rejected at enable time. Pre-mobile/SMS
-// approval flow this is the only safety net — keep it conservative.
+// MaxAutoApproveTTL is the hard absolute cap from the moment the lease is
+// enabled. Even with continuous activity, the lease cannot live longer than
+// this — pre-mobile/SMS approval, this is the only safety net.
 const MaxAutoApproveTTL = 30 * time.Minute
+
+// DefaultAutoApproveIdleWindow is how long the lease stays alive between
+// approved requests. Each use bumps ExpiresAt to now+IdleWindow, capped by
+// MaxExpiresAt. Means: enable once, requests keep it on, idle = expires fast.
+const DefaultAutoApproveIdleWindow = 5 * time.Minute
 
 // AutoApproveLease is what's persisted under <state>/auto-approve.lease.
 // It deliberately mirrors a thin slice of AuditEvent so a leaked lease
 // file is enough to reconstruct who turned it on and why.
 type AutoApproveLease struct {
-	EnabledAt time.Time `json:"enabled_at"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Reason    string    `json:"reason,omitempty"`
+	EnabledAt    time.Time     `json:"enabled_at"`
+	ExpiresAt    time.Time     `json:"expires_at"`
+	MaxExpiresAt time.Time     `json:"max_expires_at"`
+	IdleWindow   time.Duration `json:"idle_window_ns,omitempty"`
+	Reason       string        `json:"reason,omitempty"`
 }
 
 func autoApproveLeasePath(stateDir string) string {
@@ -30,28 +37,44 @@ func autoApproveLeasePath(stateDir string) string {
 }
 
 // enableAutoApprove writes a fresh lease, replacing any existing one.
-// Returns the lease that was written.
+// idleWindow is how long the lease stays alive between successful requests;
+// when zero, DefaultAutoApproveIdleWindow is used. ttl is the absolute
+// hard ceiling — the lease cannot live longer than that from enable time,
+// regardless of how much activity is renewing it.
 func enableAutoApprove(stateDir string, ttl time.Duration, reason string) (AutoApproveLease, error) {
+	return enableAutoApproveWithIdle(stateDir, ttl, 0, reason)
+}
+
+func enableAutoApproveWithIdle(stateDir string, ttl, idleWindow time.Duration, reason string) (AutoApproveLease, error) {
 	if ttl <= 0 {
 		return AutoApproveLease{}, errors.New("auto-approve ttl must be positive")
 	}
 	if ttl > MaxAutoApproveTTL {
 		return AutoApproveLease{}, fmt.Errorf("auto-approve ttl %s exceeds hard cap %s", ttl, MaxAutoApproveTTL)
 	}
+	if idleWindow <= 0 {
+		idleWindow = DefaultAutoApproveIdleWindow
+	}
+	if idleWindow > ttl {
+		idleWindow = ttl
+	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return AutoApproveLease{}, err
 	}
 	now := time.Now().UTC()
+	maxExpires := now.Add(ttl)
+	initialExpires := now.Add(idleWindow)
+	if initialExpires.After(maxExpires) {
+		initialExpires = maxExpires
+	}
 	lease := AutoApproveLease{
-		EnabledAt: now,
-		ExpiresAt: now.Add(ttl),
-		Reason:    reason,
+		EnabledAt:    now,
+		ExpiresAt:    initialExpires,
+		MaxExpiresAt: maxExpires,
+		IdleWindow:   idleWindow,
+		Reason:       reason,
 	}
-	data, err := json.MarshalIndent(lease, "", "  ")
-	if err != nil {
-		return AutoApproveLease{}, err
-	}
-	if err := os.WriteFile(autoApproveLeasePath(stateDir), data, 0o600); err != nil {
+	if err := writeAutoApproveLease(stateDir, lease); err != nil {
 		return AutoApproveLease{}, err
 	}
 	return lease, nil
@@ -68,7 +91,8 @@ func disableAutoApprove(stateDir string) error {
 
 // readAutoApproveLease returns (lease, true) if a non-expired lease exists,
 // else (zero, false). Expired leases are removed as a side-effect so the
-// lease file doesn't accumulate stale state.
+// lease file doesn't accumulate stale state. Reads MaxExpiresAt for legacy
+// leases that were written before rolling-renew shipped.
 func readAutoApproveLease(stateDir string, now time.Time) (AutoApproveLease, bool) {
 	data, err := os.ReadFile(autoApproveLeasePath(stateDir))
 	if err != nil {
@@ -78,9 +102,49 @@ func readAutoApproveLease(stateDir string, now time.Time) (AutoApproveLease, boo
 	if err := json.Unmarshal(data, &lease); err != nil {
 		return AutoApproveLease{}, false
 	}
-	if !now.Before(lease.ExpiresAt) {
+	if lease.MaxExpiresAt.IsZero() {
+		// Legacy lease without MaxExpiresAt: treat ExpiresAt as the absolute cap.
+		lease.MaxExpiresAt = lease.ExpiresAt
+	}
+	if !now.Before(lease.ExpiresAt) || !now.Before(lease.MaxExpiresAt) {
 		_ = os.Remove(autoApproveLeasePath(stateDir))
 		return lease, false
 	}
 	return lease, true
+}
+
+// renewAutoApproveLease bumps ExpiresAt forward to now+IdleWindow, capped
+// at MaxExpiresAt. Returns the renewed lease and whether anything changed.
+// A no-op if the lease is already expired or already at the absolute cap.
+func renewAutoApproveLease(stateDir string, now time.Time) (AutoApproveLease, bool) {
+	lease, active := readAutoApproveLease(stateDir, now)
+	if !active {
+		return lease, false
+	}
+	idle := lease.IdleWindow
+	if idle <= 0 {
+		idle = DefaultAutoApproveIdleWindow
+	}
+	target := now.Add(idle)
+	if target.After(lease.MaxExpiresAt) {
+		target = lease.MaxExpiresAt
+	}
+	if !target.After(lease.ExpiresAt) {
+		// Either we hit the cap or the bump would be backwards.
+		return lease, false
+	}
+	lease.ExpiresAt = target
+	if err := writeAutoApproveLease(stateDir, lease); err != nil {
+		// On write failure, return the old lease but report no change.
+		return lease, false
+	}
+	return lease, true
+}
+
+func writeAutoApproveLease(stateDir string, lease AutoApproveLease) error {
+	data, err := json.MarshalIndent(lease, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(autoApproveLeasePath(stateDir), data, 0o600)
 }

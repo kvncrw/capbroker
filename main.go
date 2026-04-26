@@ -65,21 +65,25 @@ func cmdAutoApprove(args []string) {
 func cmdAutoApproveEnable(args []string) {
 	fs := flag.NewFlagSet("auto-approve enable", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "state directory")
-	ttlValue := fs.String("ttl", "30m", fmt.Sprintf("lease TTL, hard-capped at %s", MaxAutoApproveTTL))
+	ttlValue := fs.String("ttl", "30m", fmt.Sprintf("absolute hard ceiling on lease lifetime, capped at %s", MaxAutoApproveTTL))
+	idleValue := fs.String("idle-window", DefaultAutoApproveIdleWindow.String(), "idle expiry window — each approved request bumps expiry to now+window, capped by --ttl")
 	reason := fs.String("reason", "", "human-readable why (logged to audit and stored in the lease)")
 	_ = fs.Parse(args)
 	ttl, err := time.ParseDuration(*ttlValue)
+	die(err)
+	idle, err := time.ParseDuration(*idleValue)
 	die(err)
 	dir := *stateDir
 	if dir == "" {
 		dir = defaultStateDir()
 	}
-	lease, err := enableAutoApprove(dir, ttl, *reason)
+	lease, err := enableAutoApproveWithIdle(dir, ttl, idle, *reason)
 	die(err)
 	_ = appendAudit(dir, AuditEvent{
-		Event:   "auto_approve_lease_enabled",
-		Reason:  *reason,
-		Message: fmt.Sprintf("auto-approve lease active until %s", lease.ExpiresAt.Format(time.RFC3339)),
+		Event:  "auto_approve_lease_enabled",
+		Reason: *reason,
+		Message: fmt.Sprintf("auto-approve lease active until %s (idle %s, max %s)",
+			lease.ExpiresAt.Format(time.RFC3339), lease.IdleWindow, lease.MaxExpiresAt.Format(time.RFC3339)),
 	})
 	printJSON(lease)
 }
@@ -428,7 +432,7 @@ Commands:
   capbroker remote-run --server URL --agent AGENT --profile PROFILE --resource RESOURCE [--reason TEXT] -- COMMAND [ARGS...]
   capbroker grants [--active=true]
   capbroker revoke --id GRANT_ID | --all
-  capbroker auto-approve enable [--ttl 30m] [--reason TEXT]
+  capbroker auto-approve enable [--ttl 30m] [--idle-window 5m] [--reason TEXT]
   capbroker auto-approve disable
   capbroker auto-approve status`)
 }
