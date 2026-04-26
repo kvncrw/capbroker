@@ -28,6 +28,7 @@ type Defaults struct {
 
 type Profile struct {
 	Description       string            `json:"description"`
+	Kind              string            `json:"kind,omitempty"` // "command" (default) | "vault"
 	Agents            []string          `json:"agents"`
 	Resources         []string          `json:"resources"`
 	TTLSeconds        int               `json:"ttl_seconds"`
@@ -37,7 +38,11 @@ type Profile struct {
 	CriticalCommands  [][]string        `json:"critical_commands,omitempty"`
 	Env               map[string]string `json:"env"`
 	Files             map[string]string `json:"files,omitempty"`
-	Metadata          map[string]string `json:"metadata"`
+	// Vault profile fields. Only consulted when Kind == "vault".
+	Vault       string   `json:"vault,omitempty"`        // "bsm" | "bw"
+	VaultAuth   string   `json:"vault_auth,omitempty"`   // SecretSource ID resolving the daemon's vault credential
+	VaultFields []string `json:"vault_fields,omitempty"` // bw only: fields the agent may request
+	Metadata    map[string]string `json:"metadata"`
 }
 
 type SecretSource struct {

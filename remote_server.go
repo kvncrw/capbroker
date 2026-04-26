@@ -80,14 +80,21 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	req := Request{
+		Kind:              create.Kind,
 		Agent:             create.Agent,
 		Profile:           create.Profile,
 		Resource:          create.Resource,
 		Reason:            create.Reason,
 		Command:           create.Command,
+		VaultRef:          create.VaultRef,
+		VaultField:        create.VaultField,
 		SessionTTLSeconds: create.SessionTTLSeconds,
 	}
-	if _, err := s.cfg.validateRequest(req, true); err != nil {
+	// `needsCommand` is only meaningful for the command kind. Vault
+	// requests have an empty command and validateRequest enforces that
+	// internally based on profile.Kind.
+	needsCommand := req.Kind == "" || req.Kind == requestKindCommand
+	if _, err := s.cfg.validateRequest(req, needsCommand); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -98,11 +105,14 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 	now := time.Now().UTC()
 	remoteReq := RemoteRequest{
 		ID:                "req_" + randomHex(16),
+		Kind:              create.Kind,
 		Agent:             create.Agent,
 		Profile:           create.Profile,
 		Resource:          create.Resource,
 		Reason:            create.Reason,
 		Command:           create.Command,
+		VaultRef:          create.VaultRef,
+		VaultField:        create.VaultField,
 		SessionTTLSeconds: create.SessionTTLSeconds,
 		ClientPublicKey:   create.ClientPublicKey,
 		Status:            remoteStatusPending,
