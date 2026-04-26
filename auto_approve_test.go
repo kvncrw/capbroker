@@ -174,6 +174,43 @@ func TestDisableAutoApproveMissingFileNoError(t *testing.T) {
 	}
 }
 
+func TestRenewAutoApproveLeaseConcurrentSafe(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := enableAutoApproveWithIdle(dir, 30*time.Minute, 5*time.Minute, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Spawn N goroutines all renewing concurrently with monotonically increasing
+	// `now` values. With the file lock in place, the final ExpiresAt must equal
+	// the highest target, never a stale earlier one.
+	const goroutines = 16
+	base := time.Now()
+	done := make(chan struct{}, goroutines)
+	for i := 0; i < goroutines; i++ {
+		offset := time.Duration(i) * time.Second
+		go func() {
+			renewAutoApproveLease(dir, base.Add(offset))
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+	// ExpiresAt should be at least base + (goroutines-1)*1s + small idle margin,
+	// proving the latest writer's value won (not an earlier writer's).
+	final, active := readAutoApproveLease(dir, base.Add(time.Duration(goroutines)*time.Second))
+	if !active {
+		t.Fatal("expected lease still active after concurrent renews")
+	}
+	earliestAcceptable := base.Add(time.Duration(goroutines-1) * time.Second).Add(5 * time.Minute).UTC()
+	// Allow a small slack since the lock-acquisition order isn't strictly the
+	// same as the offset order — we just want the final value to reflect a
+	// recent renewal, not a stale one.
+	slack := 2 * time.Second
+	if final.ExpiresAt.Before(earliestAcceptable.Add(-slack)) {
+		t.Fatalf("expected ExpiresAt >= %v (slack %v), got %v", earliestAcceptable, slack, final.ExpiresAt)
+	}
+}
+
 func TestReadAutoApproveLeaseLegacyFormat(t *testing.T) {
 	// Lease files written before MaxExpiresAt landed must still load: the
 	// reader treats ExpiresAt as the absolute cap when MaxExpiresAt is zero.

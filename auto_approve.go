@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -116,7 +117,24 @@ func readAutoApproveLease(stateDir string, now time.Time) (AutoApproveLease, boo
 // renewAutoApproveLease bumps ExpiresAt forward to now+IdleWindow, capped
 // at MaxExpiresAt. Returns the renewed lease and whether anything changed.
 // A no-op if the lease is already expired or already at the absolute cap.
+//
+// Read-modify-write is serialized via flock on a sibling .lock file so
+// concurrent renewals (multiple in-flight remote requests under one
+// auto-approve session) cannot race and clobber each other's bumps —
+// otherwise a writer with a stale `now` could overwrite a fresher
+// ExpiresAt and effectively shorten the lease.
 func renewAutoApproveLease(stateDir string, now time.Time) (AutoApproveLease, bool) {
+	unlock, err := lockAutoApproveLease(stateDir)
+	if err != nil {
+		// If we can't acquire the lock (filesystem error, missing dir),
+		// fall back to lockless behavior — better than failing closed.
+		return renewAutoApproveLeaseUnsafe(stateDir, now)
+	}
+	defer unlock()
+	return renewAutoApproveLeaseUnsafe(stateDir, now)
+}
+
+func renewAutoApproveLeaseUnsafe(stateDir string, now time.Time) (AutoApproveLease, bool) {
 	lease, active := readAutoApproveLease(stateDir, now)
 	if !active {
 		return lease, false
@@ -139,6 +157,28 @@ func renewAutoApproveLease(stateDir string, now time.Time) (AutoApproveLease, bo
 		return lease, false
 	}
 	return lease, true
+}
+
+// lockAutoApproveLease acquires an exclusive flock on a sibling .lock file
+// so concurrent renewers serialize. The returned func releases the lock
+// and closes the fd.
+func lockAutoApproveLease(stateDir string) (func(), error) {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return nil, err
+	}
+	lockPath := autoApproveLeasePath(stateDir) + ".lock"
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 func writeAutoApproveLease(stateDir string, lease AutoApproveLease) error {

@@ -23,6 +23,11 @@ func ensureApproved(cfg *Config, stateDir string, req Request, profile Profile) 
 		if grant, err := activeGrant(stateDir, req, now); err != nil {
 			return Grant{}, false, err
 		} else if grant != nil {
+			// Reusing an active operator-session grant is itself "activity"
+			// for the auto-approve lease. Without renewing here, a busy run
+			// served by one session would let the lease quietly age out and
+			// the next new scope/resource would prompt unexpectedly.
+			_, _ = renewAutoApproveLease(stateDir, now)
 			return *grant, false, nil
 		}
 	}
