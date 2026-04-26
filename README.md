@@ -116,6 +116,7 @@ Or use the wrapper:
 
 ```bash
 cap-gh pr view 142 --repo example-org/example-repo
+cap-gh repo view example-org/example-repo
 ```
 
 ## Policy Shape

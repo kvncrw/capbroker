@@ -26,8 +26,18 @@ for arg in "$@"; do
   prev="$arg"
 done
 
+if [ -z "$repo" ] && [ "${1:-}" = "repo" ]; then
+  case "${2:-}" in
+    view|clone|fork)
+      case "${3:-}" in
+        */*) repo="$3" ;;
+      esac
+      ;;
+  esac
+fi
+
 if [ -z "$repo" ]; then
-  echo "cap-gh requires --repo OWNER/REPO or -R OWNER/REPO" >&2
+  echo "cap-gh requires --repo OWNER/REPO, -R OWNER/REPO, or gh repo view/clone/fork OWNER/REPO" >&2
   exit 2
 fi
 
