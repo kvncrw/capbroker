@@ -37,10 +37,10 @@ type permissionGrant struct {
 	TargetResource string    `json:"target_resource"`
 	GrantMode      string    `json:"grant_mode"`
 	GrantedAt      time.Time `json:"granted_at"`
-	ExpiresAt      time.Time `json:"expires_at,omitempty"`  // temporal only
-	GrantedBy      string    `json:"granted_by,omitempty"`  // operator identifier (e.g. "kcrawley")
-	RequestID      string    `json:"request_id,omitempty"`  // upgrade request that created the grant
-	Reason         string    `json:"reason,omitempty"`      // copied from the upgrade request
+	ExpiresAt      time.Time `json:"expires_at,omitempty"` // temporal only
+	GrantedBy      string    `json:"granted_by,omitempty"` // operator identifier (e.g. "kcrawley")
+	RequestID      string    `json:"request_id,omitempty"` // upgrade request that created the grant
+	Reason         string    `json:"reason,omitempty"`     // copied from the upgrade request
 }
 
 func permanentGrantsPath(stateDir string) string {

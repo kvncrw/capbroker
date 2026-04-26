@@ -109,13 +109,13 @@ type EncryptedLease struct {
 }
 
 type LeasePayload struct {
-	Env         map[string]string `json:"env"`
-	Files       map[string]string `json:"files,omitempty"`
-	Agent       string            `json:"agent"`
-	Profile     string            `json:"profile"`
-	Resource    string            `json:"resource"`
-	Reason      string            `json:"reason"`
-	Command     []string          `json:"command"`
+	Env            map[string]string `json:"env"`
+	Files          map[string]string `json:"files,omitempty"`
+	Agent          string            `json:"agent"`
+	Profile        string            `json:"profile"`
+	Resource       string            `json:"resource"`
+	Reason         string            `json:"reason"`
+	Command        []string          `json:"command"`
 	ExpiresAt      time.Time         `json:"expires_at"`
 	SecretValue    string            `json:"secret_value,omitempty"`    // vault-fetch only
 	UpgradeGranted string            `json:"upgrade_granted,omitempty"` // permission-upgrade: "once:24h0m0s" | "session" | "permanent"

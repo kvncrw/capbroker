@@ -49,9 +49,9 @@ type Profile struct {
 	Env               map[string]string `json:"env"`
 	Files             map[string]string `json:"files,omitempty"`
 	// Vault profile fields. Only consulted when Kind == "vault".
-	Vault       string   `json:"vault,omitempty"`        // "bsm" | "bw"
-	VaultAuth   string   `json:"vault_auth,omitempty"`   // SecretSource ID resolving the daemon's vault credential
-	VaultFields []string `json:"vault_fields,omitempty"` // bw only: fields the agent may request
+	Vault       string            `json:"vault,omitempty"`        // "bsm" | "bw"
+	VaultAuth   string            `json:"vault_auth,omitempty"`   // SecretSource ID resolving the daemon's vault credential
+	VaultFields []string          `json:"vault_fields,omitempty"` // bw only: fields the agent may request
 	Metadata    map[string]string `json:"metadata"`
 }
 
@@ -75,6 +75,24 @@ type SecretProvider struct {
 
 type RemoteConfig struct {
 	Approvers map[string]string `json:"approvers,omitempty"`
+	// UpgradeApprovers is the allowlist of operator identities (typically
+	// email addresses from Cf-Access-Authenticated-User-Email) authorized
+	// to decide permission-upgrade requests via the HTTP review surface
+	// or the review-upgrades CLI. Fail-closed: if empty AND
+	// AllowAnonymousUpgrade is false, all decision attempts are rejected.
+	// This is defense-in-depth — the daemon assumes Cloudflare Access (or
+	// equivalent) is in front, but enforces the allowlist itself in case
+	// CF Access is bypassed (direct tailnet hit, misconfigured ingress,
+	// etc.). Without this gate, anyone reachable to the daemon who knew a
+	// pending request id could POST /v1/upgrades/{id}/decide and self-grant
+	// permanent allowlist entries.
+	UpgradeApprovers []string `json:"upgrade_approvers,omitempty"`
+	// AllowAnonymousUpgrade is the escape hatch: when true, the upgrade
+	// decide path accepts decisions with no trusted-header identity and
+	// audits them as "anonymous-http". Intended for local dev/test only;
+	// production daemons should leave this false and populate
+	// UpgradeApprovers.
+	AllowAnonymousUpgrade bool `json:"allow_anonymous_upgrade,omitempty"`
 }
 
 func loadConfig(path string) (*Config, error) {

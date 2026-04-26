@@ -31,7 +31,8 @@ import (
 // operatorIdent extracts the operator identity from a Cloudflare Access
 // trusted header, falling back to "anonymous-http". Header name comes from
 // the daemon config; empty means use the default. Empty/absent value =
-// anonymous (still allowed but tagged in audit).
+// anonymous (only accepted when cfg.Remote.AllowAnonymousUpgrade is true;
+// see authorizeUpgradeOperator).
 func operatorIdent(r *http.Request) string {
 	if v := r.Header.Get("Cf-Access-Authenticated-User-Email"); v != "" {
 		return v
@@ -40,6 +41,62 @@ func operatorIdent(r *http.Request) string {
 		return v
 	}
 	return "anonymous-http"
+}
+
+// authorizeUpgradeOperator gates the upgrade decision path on the daemon
+// side. Codex review on PR #12 caught that handleUpgradeAPI applied
+// decisions immediately from request body+headers with no daemon-side
+// auth check — Cloudflare Access in front was the only gate. If anything
+// bypassed CF Access (direct tailnet hit, misconfigured ingress), an
+// attacker who knew a pending upgrade id could POST {"mode":"permanent"}
+// and write permanent allowlist grants.
+//
+// Fail-closed model:
+//   - If cfg.Remote.UpgradeApprovers is non-empty, the operator from the
+//     trusted header MUST be in the list (case-insensitive). Otherwise
+//     reject with 403 + audit.
+//   - If cfg.Remote.UpgradeApprovers is empty AND AllowAnonymousUpgrade is
+//     true, accept anyone (dev/test mode). The audit still records the
+//     header-supplied identity, which is "anonymous-http" if absent.
+//   - If cfg.Remote.UpgradeApprovers is empty AND AllowAnonymousUpgrade is
+//     false, reject ALL decisions. This is the safe production default
+//     for a freshly-installed daemon — operator must opt in by
+//     populating the list.
+//
+// Returns the validated operator identity (to record in audit + grant)
+// or an error suitable for 403.
+func (s *capbrokerServer) authorizeUpgradeOperator(r *http.Request) (string, error) {
+	op := operatorIdent(r)
+	if len(s.cfg.Remote.UpgradeApprovers) == 0 {
+		if s.cfg.Remote.AllowAnonymousUpgrade {
+			return op, nil
+		}
+		return "", fmt.Errorf("upgrade decisions are disabled: configure remote.upgrade_approvers (or set remote.allow_anonymous_upgrade for dev)")
+	}
+	if op == "anonymous-http" {
+		return "", fmt.Errorf("upgrade decisions require an authenticated operator (no trusted-header identity present)")
+	}
+	wanted := strings.ToLower(strings.TrimSpace(op))
+	for _, allowed := range s.cfg.Remote.UpgradeApprovers {
+		if strings.ToLower(strings.TrimSpace(allowed)) == wanted {
+			return op, nil
+		}
+	}
+	return "", fmt.Errorf("operator %q is not in remote.upgrade_approvers", op)
+}
+
+// recordUnauthorizedUpgrade audits a rejected decision attempt so the
+// operator has a record of attempted self-approvals. Best-effort — audit
+// failures don't block the rejection.
+func (s *capbrokerServer) recordUnauthorizedUpgrade(requestID, attempted string, r *http.Request, reason error) {
+	denied := false
+	_ = appendAudit(s.stateDir, AuditEvent{
+		Event:    "permission_upgrade_unauthorized",
+		GrantID:  requestID,
+		Approved: &denied,
+		Message: fmt.Sprintf("attempted-mode=%s attempted-operator=%q remote=%s reason=%s",
+			attempted, operatorIdent(r), r.RemoteAddr, reason.Error()),
+	})
 }
 
 // upgradeUIRouter dispatches /u/... requests. Registered as a single
@@ -88,9 +145,15 @@ func (s *capbrokerServer) handleUpgradeAPI(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	op, err := s.authorizeUpgradeOperator(r)
+	if err != nil {
+		s.recordUnauthorizedUpgrade(id, body.Mode, r, err)
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	updated, err := s.decidePermissionUpgrade(id, upgradeDecision{
 		Mode:     body.Mode,
-		Operator: operatorIdent(r),
+		Operator: op,
 		Message:  body.Message,
 	})
 	if err != nil {
@@ -189,9 +252,23 @@ func (s *capbrokerServer) handleUpgradeDecideForm(w http.ResponseWriter, r *http
 	}
 	mode := strings.TrimSpace(r.PostFormValue("mode"))
 	message := strings.TrimSpace(r.PostFormValue("message"))
+	op, err := s.authorizeUpgradeOperator(r)
+	if err != nil {
+		s.recordUnauthorizedUpgrade(id, mode, r, err)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, "<!doctype html><meta name=\"viewport\" content=\"width=device-width\">"+
+			"<style>body{font-family:system-ui;padding:1.5em;max-width:40em}"+
+			".err{color:#a00;border:1px solid #a00;padding:.8em;border-radius:.4em}</style>"+
+			"<h1>Not authorized</h1><div class=err>%s</div>"+
+			"<p><a href=\"/u/%s\">← back</a></p>",
+			template.HTMLEscapeString(err.Error()),
+			template.HTMLEscapeString(id))
+		return
+	}
 	updated, err := s.decidePermissionUpgrade(id, upgradeDecision{
 		Mode:     mode,
-		Operator: operatorIdent(r),
+		Operator: op,
 		Message:  message,
 	})
 	if err != nil {
@@ -219,7 +296,7 @@ func (s *capbrokerServer) handleUpgradeDecideForm(w http.ResponseWriter, r *http
 		"<p>Request <code>%s</code> is now <strong>%s</strong>.</p>"+
 		"<p><a href=\"/u/\">← all pending</a></p>",
 		template.HTMLEscapeString(mode),
-		template.HTMLEscapeString(operatorIdent(r)),
+		template.HTMLEscapeString(op),
 		template.HTMLEscapeString(updated.ID),
 		template.HTMLEscapeString(updated.Status))
 }

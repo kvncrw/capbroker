@@ -55,7 +55,7 @@ func TestLocalAuthorityReusesActiveOperatorSession(t *testing.T) {
 		stateDir: stateDir,
 		store:    newRemoteStore(stateDir),
 	}
-	remoteReq := createStoredRemoteRequest(t, server.store, req, publicKey)
+	remoteReq := createStoredRemoteRequest(t, &server.store, req, publicKey)
 	server.localDecideRequest(remoteReq)
 	updated, ok, err := server.store.get(remoteReq.ID)
 	if err != nil {
@@ -102,7 +102,7 @@ func TestCriticalRequestDoesNotReuseActiveOperatorSession(t *testing.T) {
 		stateDir: stateDir,
 		store:    newRemoteStore(stateDir),
 	}
-	remoteReq := createStoredRemoteRequest(t, server.store, req, publicKey)
+	remoteReq := createStoredRemoteRequest(t, &server.store, req, publicKey)
 	server.localDecideRequest(remoteReq)
 	updated, ok, err := server.store.get(remoteReq.ID)
 	if err != nil {
@@ -150,7 +150,7 @@ func operatorSessionTestConfig(includeCritical bool) *Config {
 	}
 }
 
-func createStoredRemoteRequest(t *testing.T, store remoteStore, req Request, publicKey string) RemoteRequest {
+func createStoredRemoteRequest(t *testing.T, store *remoteStore, req Request, publicKey string) RemoteRequest {
 	t.Helper()
 	remoteReq, err := store.create(RemoteRequest{
 		ID:                "req_" + randomHex(16),

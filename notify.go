@@ -26,7 +26,7 @@ type NotifyConfig struct {
 // Type=="" (or absent) disables the notifier — failures are logged but
 // never block the upgrade flow.
 type NotifyTarget struct {
-	Type           string            `json:"type"`             // "command" today; "http" reserved
+	Type           string            `json:"type"` // "command" today; "http" reserved
 	Command        []string          `json:"command,omitempty"`
 	SecretSources  map[string]string `json:"secret_sources,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
