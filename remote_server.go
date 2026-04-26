@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,26 +19,30 @@ type capbrokerServer struct {
 	allowUnsignedDecision bool
 	localApprove          bool
 
-	// Permission-upgrade per-agent guards. Created on first server use;
-	// shared across the lifetime of the daemon.
-	upgradeRateLimit *rateLimiter
-	upgradeDedup     *reasonDedupCache
+	// Permission-upgrade per-agent guards. Lazy-initialized exactly once
+	// via upgradeGuardsOnce; safe under concurrent request handlers.
+	upgradeGuardsOnce sync.Once
+	upgradeRateLimit  *rateLimiter
+	upgradeDedup      *reasonDedupCache
+
+	// Serializes permission-upgrade decisions so two operators racing
+	// the same pending request can't both write grants. Operators are
+	// humans clicking buttons — throughput isn't a concern.
+	upgradeDecideMu sync.Mutex
 }
 
-// upgradeGuards lazy-initializes the rate-limit and dedup primitives the
-// first time they're needed and returns them. Splitting out so server
-// struct literals (e.g. tests) don't have to know about them.
+// upgradeGuards initializes the rate-limit and dedup primitives once on
+// first call and returns them. Thread-safe; concurrent callers see
+// the same instances.
 func (s *capbrokerServer) upgradeGuards() (*rateLimiter, *reasonDedupCache) {
-	if s.upgradeRateLimit == nil {
+	s.upgradeGuardsOnce.Do(func() {
 		limit := 5
 		if s.cfg != nil && s.cfg.PermissionUpgrade.RateLimitPerHour > 0 {
 			limit = s.cfg.PermissionUpgrade.RateLimitPerHour
 		}
 		s.upgradeRateLimit = newRateLimiter(limit, time.Hour)
-	}
-	if s.upgradeDedup == nil {
 		s.upgradeDedup = newReasonDedupCache()
-	}
+	})
 	return s.upgradeRateLimit, s.upgradeDedup
 }
 
@@ -137,12 +142,20 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusForbidden, "vault requests require a local-approve daemon (signed-approver flow does not support authority-side execution)")
 		return
 	}
+	// Cheap input-shape validation BEFORE the rate-limit / dedup spend.
+	// A malformed client_public_key would otherwise burn the agent's
+	// hourly upgrade quota and lock the dedup key, blocking immediate
+	// corrected retries.
+	if err := validateLeaseRecipientPublicKey(create.ClientPublicKey); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// Permission-upgrade requests have additional anti-spam guards: a
 	// per-agent rate limit (default 5/hour) and a reason-dedup window
 	// so an agent can't slam the operator with the same justification
-	// repeatedly. These run AFTER policy validation so a malformed
-	// upgrade request returns 403 (informative) before the rate-limit
-	// counter gets bumped.
+	// repeatedly. These run AFTER policy + input-shape validation so a
+	// malformed upgrade request returns 403/400 (informative) before
+	// the rate-limit counter gets bumped.
 	if req.Kind == requestKindPermissionUpgrade {
 		if !s.localApprove {
 			writeError(w, http.StatusForbidden, "permission-upgrade requests require a local-approve daemon")
@@ -160,10 +173,6 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusBadRequest, "duplicate upgrade request — provide a fresh justification or wait for the previous request to be decided")
 			return
 		}
-	}
-	if err := validateLeaseRecipientPublicKey(create.ClientPublicKey); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
 	}
 	now := time.Now().UTC()
 	remoteReq := RemoteRequest{

@@ -31,6 +31,14 @@ type upgradeDecision struct {
 // already-decided request returns an error. This forces the front door to
 // surface the conflict (e.g. "another operator already approved this").
 func (s *capbrokerServer) decidePermissionUpgrade(requestID string, decision upgradeDecision) (RemoteRequest, error) {
+	// Serialize the entire decide path so two operators racing the same
+	// pending request can't both reach the claim — and even if they do,
+	// applyUpgradeApproval claims via atomic store.update before writing
+	// the grant (defense-in-depth against the rare case of additional
+	// concurrent decision sites).
+	s.upgradeDecideMu.Lock()
+	defer s.upgradeDecideMu.Unlock()
+
 	current, ok, err := s.store.get(requestID)
 	if err != nil {
 		return RemoteRequest{}, err
@@ -58,13 +66,9 @@ func (s *capbrokerServer) decidePermissionUpgrade(requestID string, decision upg
 func (s *capbrokerServer) applyUpgradeApproval(current RemoteRequest, decision upgradeDecision) (RemoteRequest, error) {
 	now := time.Now().UTC()
 
-	// Persist the grant first so a crash between persist and request-update
-	// leaves a "granted but request still pending" state — the operator
-	// can retry the decision and the grant file's idempotency check (the
-	// agent retries, sees the resource is now allowed, succeeds even
-	// without the matching upgrade-request approval) will keep things
-	// moving. Better than the inverse: an approved request with no grant
-	// behind it would silently fail on retry.
+	// Compute grant TTL and lease metadata up-front (no side effects).
+	// The grant struct is used both for the eventual write AND for
+	// computing the UpgradeGranted marker on the lease.
 	grant := permissionGrant{
 		TargetProfile:  current.TargetProfile,
 		TargetResource: current.TargetResource,
@@ -76,14 +80,9 @@ func (s *capbrokerServer) applyUpgradeApproval(current RemoteRequest, decision u
 	}
 	switch decision.Mode {
 	case grantModePermanent:
-		if err := appendPermanentGrant(s.stateDir, grant); err != nil {
-			return RemoteRequest{}, fmt.Errorf("persist permanent grant: %w", err)
-		}
+		// no expires_at
 	case grantModeOnce:
 		grant.ExpiresAt = now.Add(onceTTL)
-		if err := appendTemporalGrant(s.stateDir, grant); err != nil {
-			return RemoteRequest{}, fmt.Errorf("persist once grant: %w", err)
-		}
 	case grantModeSession:
 		// "session" is bound to the operator's active session TTL. We use
 		// the daemon-wide max_session_seconds default — the operator can
@@ -93,25 +92,9 @@ func (s *capbrokerServer) applyUpgradeApproval(current RemoteRequest, decision u
 			max = 3 * time.Hour
 		}
 		grant.ExpiresAt = now.Add(max)
-		if err := appendTemporalGrant(s.stateDir, grant); err != nil {
-			return RemoteRequest{}, fmt.Errorf("persist session grant: %w", err)
-		}
 	}
-	_ = appendAudit(s.stateDir, AuditEvent{
-		Event:       "permission_upgrade_applied",
-		Agent:       current.Agent,
-		Profile:     current.Profile,
-		Resource:    current.Resource,
-		Reason:      current.Reason,
-		RequestHash: requestHash(current.Request()),
-		GrantID:     current.ID,
-		Message: fmt.Sprintf("granted %s += %q (mode=%s, operator=%s)",
-			current.TargetProfile, current.TargetResource, decision.Mode, decision.Operator),
-	})
 
-	// Build a small lease so the agent client knows the decision and can
-	// resume. UpgradeGranted carries the mode + (for temporal) the TTL —
-	// the agent uses this to decide whether to retry once or many times.
+	// Build the lease deterministically from the decision (no I/O).
 	upgradeMarker := decision.Mode
 	if !grant.ExpiresAt.IsZero() {
 		upgradeMarker = fmt.Sprintf("%s:%s", decision.Mode, grant.ExpiresAt.Sub(now).Round(time.Second))
@@ -132,6 +115,12 @@ func (s *capbrokerServer) applyUpgradeApproval(current RemoteRequest, decision u
 		return RemoteRequest{}, fmt.Errorf("encrypt upgrade lease: %w", err)
 	}
 
+	// CLAIM the request first via atomic store.update. If two operators
+	// race (or a CLI + HTTP front race), exactly one wins this call;
+	// losers see "request is already approved" and never reach the
+	// grant write below. Without this ordering, both operators could
+	// each append a grant to permanent-grants.jsonl before the second
+	// store.update fails, leaving an unintended grant alive.
 	updated, err := s.store.update(current.ID, func(req *RemoteRequest) error {
 		if req.Status != remoteStatusPending {
 			return fmt.Errorf("request is already %s", req.Status)
@@ -146,6 +135,37 @@ func (s *capbrokerServer) applyUpgradeApproval(current RemoteRequest, decision u
 	if err != nil {
 		return RemoteRequest{}, fmt.Errorf("mark approved: %w", err)
 	}
+
+	// We won the race — now persist the grant. If THIS fails (disk full,
+	// permissions, etc.) the request is already marked approved with no
+	// grant behind it; the agent's retry hits 403, the audit shows
+	// permission_upgrade_grant_failed, and the operator can investigate.
+	// The inverse failure mode (grant written but request not approved)
+	// would silently broaden access — that's the one we never want.
+	switch decision.Mode {
+	case grantModePermanent:
+		if err := appendPermanentGrant(s.stateDir, grant); err != nil {
+			s.recordUpgradeGrantFailure(current, decision, err)
+			return updated, fmt.Errorf("persist permanent grant: %w", err)
+		}
+	case grantModeOnce, grantModeSession:
+		if err := appendTemporalGrant(s.stateDir, grant); err != nil {
+			s.recordUpgradeGrantFailure(current, decision, err)
+			return updated, fmt.Errorf("persist %s grant: %w", decision.Mode, err)
+		}
+	}
+	_ = appendAudit(s.stateDir, AuditEvent{
+		Event:       "permission_upgrade_applied",
+		Agent:       current.Agent,
+		Profile:     current.Profile,
+		Resource:    current.Resource,
+		Reason:      current.Reason,
+		RequestHash: requestHash(current.Request()),
+		GrantID:     current.ID,
+		Message: fmt.Sprintf("granted %s += %q (mode=%s, operator=%s)",
+			current.TargetProfile, current.TargetResource, decision.Mode, decision.Operator),
+	})
+
 	approved := true
 	_ = appendAudit(s.stateDir, AuditEvent{
 		Event:       "permission_upgrade_decided",
@@ -159,6 +179,25 @@ func (s *capbrokerServer) applyUpgradeApproval(current RemoteRequest, decision u
 		Message:     fmt.Sprintf("mode=%s operator=%s", decision.Mode, decision.Operator),
 	})
 	return updated, nil
+}
+
+// recordUpgradeGrantFailure audits the rare case where the request was
+// successfully claimed (approved) but the grant write failed downstream.
+// The operator can investigate via this audit line; agent retries will
+// fail-closed (403) until the grant is hand-applied or the request is
+// re-decided.
+func (s *capbrokerServer) recordUpgradeGrantFailure(current RemoteRequest, decision upgradeDecision, cause error) {
+	_ = appendAudit(s.stateDir, AuditEvent{
+		Event:       "permission_upgrade_grant_failed",
+		Agent:       current.Agent,
+		Profile:     current.Profile,
+		Resource:    current.Resource,
+		Reason:      current.Reason,
+		RequestHash: requestHash(current.Request()),
+		GrantID:     current.ID,
+		Message: fmt.Sprintf("approved %s += %q (mode=%s, operator=%s) but grant write failed: %v",
+			current.TargetProfile, current.TargetResource, decision.Mode, decision.Operator, cause),
+	})
 }
 
 func (s *capbrokerServer) applyUpgradeDenial(current RemoteRequest, decision upgradeDecision) (RemoteRequest, error) {

@@ -4,6 +4,8 @@ package main
 
 import (
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -214,5 +216,51 @@ func TestDecidePermissionUpgradeGrantUnblocksRetry(t *testing.T) {
 		Command:  []string{"kubectl", "get", "pods"},
 	}, true, server.stateDir, time.Now()); err != nil {
 		t.Fatalf("expected post-upgrade resource to be allowed, got %v", err)
+	}
+}
+
+// TestDecidePermissionUpgradeRaceWritesAtMostOneGrant exercises the
+// concurrent-decide race that Codex flagged on PR #11: without
+// claim-before-grant ordering and the upgradeDecideMu, two operators
+// racing the same pending request could each append a grant before
+// one's status update fails. Now: one decision wins (writes a grant
+// + flips status), all others see "request is already approved"
+// and append nothing.
+func TestDecidePermissionUpgradeRaceWritesAtMostOneGrant(t *testing.T) {
+	t.Parallel()
+	server, req := upgradeTestServer(t)
+	const N = 8
+	var winners atomic.Int32
+	var losers atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := server.decidePermissionUpgrade(req.ID, upgradeDecision{
+				Mode: grantModePermanent, Operator: "op",
+			})
+			if err == nil {
+				winners.Add(1)
+			} else if strings.Contains(err.Error(), "already") {
+				losers.Add(1)
+			} else {
+				t.Errorf("unexpected error from racing decide: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if winners.Load() != 1 {
+		t.Fatalf("expected exactly one winner, got %d (losers=%d)", winners.Load(), losers.Load())
+	}
+	if losers.Load() != N-1 {
+		t.Fatalf("expected %d losers, got %d", N-1, losers.Load())
+	}
+	grants, err := loadGrantsJSONL(permanentGrantsPath(server.stateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 1 {
+		t.Fatalf("race wrote %d grants; expected exactly 1", len(grants))
 	}
 }

@@ -335,3 +335,90 @@ func performJSON(handler http.Handler, method, path string, request, response in
 	handler.ServeHTTP(rec, req)
 	return decodeRemoteResponse(rec.Result(), response)
 }
+
+// TestPermissionUpgradeMalformedKeyDoesNotConsumeQuota exercises the
+// Codex P2 fix on PR #11: validateLeaseRecipientPublicKey now runs
+// BEFORE the rate-limit / dedup guards, so a malformed
+// client_public_key returns 400 without spending the agent's
+// hourly upgrade budget or locking the dedup key. Without this
+// ordering, fixing a typo and immediately retrying would hit 429
+// or "duplicate request" instead of being accepted.
+func TestPermissionUpgradeMalformedKeyDoesNotConsumeQuota(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{
+		Profiles: map[string]Profile{
+			"permission-upgrade": {
+				Kind:       requestKindPermissionUpgrade,
+				Agents:     []string{"hermes"},
+				Resources:  []string{"k8s-read"},
+				TTLSeconds: 60,
+			},
+			"k8s-read": {
+				Agents:          []string{"hermes"},
+				Resources:       []string{"namespace/kestrel"},
+				TTLSeconds:      60,
+				AllowedCommands: [][]string{{"kubectl", "get"}},
+			},
+		},
+		// Tight quota so we'd notice if the malformed POST consumed it.
+		PermissionUpgrade: PermissionUpgradeConfig{RateLimitPerHour: 1},
+	}
+	server := capbrokerServer{
+		cfg:          cfg,
+		stateDir:     t.TempDir(),
+		store:        newRemoteStore(t.TempDir()),
+		localApprove: true,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/requests", server.handleRequests)
+	mux.HandleFunc("/v1/requests/", server.handleRequestByID)
+
+	const reason = "screenshot mission needs API pod logs to diagnose missing thumbnails"
+
+	// First POST: malformed client_public_key — must return 400 and
+	// NOT bump the rate-limit counter or seed the dedup window.
+	body, _ := json.Marshal(RemoteRequestCreate{
+		Kind:            requestKindPermissionUpgrade,
+		Agent:           "hermes",
+		Profile:         "permission-upgrade",
+		Resource:        "k8s-read",
+		Reason:          reason,
+		TargetProfile:   "k8s-read",
+		TargetResource:  "namespace/basilisk",
+		GrantMode:       grantModeOnce,
+		ClientPublicKey: "not-a-real-key",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/requests", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed key, got %d body=%s", rec.Result().StatusCode, rec.Body.String())
+	}
+
+	// Second POST: identical-but-valid request must succeed (not 429,
+	// not "duplicate request"). Confirms the malformed first call
+	// consumed neither quota nor dedup state.
+	_, validKey, err := generateLeaseRecipientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = json.Marshal(RemoteRequestCreate{
+		Kind:            requestKindPermissionUpgrade,
+		Agent:           "hermes",
+		Profile:         "permission-upgrade",
+		Resource:        "k8s-read",
+		Reason:          reason,
+		TargetProfile:   "k8s-read",
+		TargetResource:  "namespace/basilisk",
+		GrantMode:       grantModeOnce,
+		ClientPublicKey: validKey,
+	})
+	req = httptest.NewRequest(http.MethodPost, "/v1/requests", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 on corrected retry, got %d body=%s", rec.Result().StatusCode, rec.Body.String())
+	}
+}
