@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -26,10 +27,39 @@ func runRemoteServer(cfg *Config, stateDir, addr string, allowUnsignedDecision, 
 		allowUnsignedDecision: allowUnsignedDecision,
 		localApprove:          localApprove,
 	}
+	if localApprove {
+		// Resume any pending requests left over from a previous daemon run.
+		// Without this, requests POSTed just before a daemon restart would
+		// hang forever (status=pending, no decider) and the client would
+		// time out — even with an active auto-approve lease in place.
+		server.resumePendingRequests()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/requests", server.handleRequests)
 	mux.HandleFunc("/v1/requests/", server.handleRequestByID)
 	return http.ListenAndServe(addr, mux)
+}
+
+// resumePendingRequests scans the store for status=pending entries left
+// over from a previous run and re-fires the local decider for each.
+// Called once at server startup when --local-approve is set.
+func (s *capbrokerServer) resumePendingRequests() {
+	requests, err := s.store.list()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "capbroker: resume scan failed: %v\n", err)
+		return
+	}
+	resumed := 0
+	for _, req := range requests {
+		if req.Status != remoteStatusPending {
+			continue
+		}
+		resumed++
+		go s.localDecideRequest(req)
+	}
+	if resumed > 0 {
+		fmt.Fprintf(os.Stderr, "capbroker: resumed %d pending request(s) after restart\n", resumed)
+	}
 }
 
 func (s *capbrokerServer) handleRequests(w http.ResponseWriter, r *http.Request) {
