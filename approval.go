@@ -30,7 +30,7 @@ func ensureApproved(cfg *Config, stateDir string, req Request, profile Profile) 
 	// Auto-approve lease (file-based, time-bounded — see auto_approve.go).
 	// Checked before any prompt so an operator who's away from the keyboard
 	// can pre-authorize a short window of approvals. Hard-capped at
-	// MaxAutoApproveTTL so a forgotten lease can't last all day.
+	// MaxAutoApproveTTL (currently 30m) so a forgotten lease can't last all day.
 	if lease, active := readAutoApproveLease(stateDir, now); active {
 		approvedTrue := true
 		_ = appendAudit(stateDir, AuditEvent{

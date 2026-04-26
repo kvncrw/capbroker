@@ -14,7 +14,7 @@ import (
 // MaxAutoApproveTTL is a hard cap on how long the on-disk auto-approve
 // lease can be. Anything longer is rejected at enable time. Pre-mobile/SMS
 // approval flow this is the only safety net — keep it conservative.
-const MaxAutoApproveTTL = 10 * time.Minute
+const MaxAutoApproveTTL = 30 * time.Minute
 
 // AutoApproveLease is what's persisted under <state>/auto-approve.lease.
 // It deliberately mirrors a thin slice of AuditEvent so a leaked lease
