@@ -35,11 +35,40 @@ ttl_args=""
 if [ -n "${CAPBROKER_SESSION_TTL:-}" ]; then
   ttl_args="--session-ttl ${CAPBROKER_SESSION_TTL}"
 fi
+denied_log="${CAPBROKER_DENIED_LOG:-/opt/data/capbroker-denied.jsonl}"
+target_profile="${CAPBROKER_PROFILE:-k8s-read}"
+target_resource="namespace/$namespace"
+
+stderr_capture="$(mktemp)"
+trap 'rm -f "$stderr_capture"' EXIT
+
+set +e
 # shellcheck disable=SC2086
-exec capbroker remote-run \
+capbroker remote-run \
   --agent "${CAPBROKER_AGENT:-remote-agent}" \
-  --profile "${CAPBROKER_PROFILE:-k8s-read}" \
-  --resource "namespace/$namespace" \
+  --profile "$target_profile" \
+  --resource "$target_resource" \
   --reason "$reason" \
   $ttl_args \
-  -- kubectl "$@"
+  -- kubectl "$@" 2> >(tee "$stderr_capture" >&2)
+status=$?
+set -e
+
+# On a 403-style denial, drop a structured breadcrumb the agent's next
+# wake handler can pick up to surface "you have outstanding capability
+# gaps". Cheap to skip if disabled (CAPBROKER_DENIED_LOG=/dev/null) or
+# if the directory doesn't exist (we don't auto-create — agents in
+# transient pods shouldn't accumulate state).
+if [ "$status" -ne 0 ] && grep -q 'is not allowed for profile' "$stderr_capture"; then
+  log_dir="$(dirname "$denied_log")"
+  if [ -d "$log_dir" ]; then
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    msg="$(grep 'is not allowed for profile' "$stderr_capture" | head -1 | sed 's/"/\\"/g')"
+    printf '{"ts":"%s","agent":"%s","target_profile":"%s","target_resource":"%s","argv":"kubectl %s","stderr":"%s"}\n' \
+      "$ts" "${CAPBROKER_AGENT:-remote-agent}" "$target_profile" "$target_resource" \
+      "$(printf '%s ' "$@" | sed 's/"/\\"/g')" "$msg" \
+      >> "$denied_log" 2>/dev/null || true
+  fi
+fi
+
+exit "$status"
