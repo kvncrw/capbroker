@@ -13,12 +13,22 @@ import (
 const configVersion = 1
 
 type Config struct {
-	Version         int                       `json:"version"`
-	Defaults        Defaults                  `json:"defaults"`
-	Profiles        map[string]Profile        `json:"profiles"`
-	SecretSources   map[string]SecretSource   `json:"secret_sources"`
-	SecretProviders map[string]SecretProvider `json:"secret_providers,omitempty"`
-	Remote          RemoteConfig              `json:"remote,omitempty"`
+	Version           int                       `json:"version"`
+	Defaults          Defaults                  `json:"defaults"`
+	Profiles          map[string]Profile        `json:"profiles"`
+	SecretSources     map[string]SecretSource   `json:"secret_sources"`
+	SecretProviders   map[string]SecretProvider `json:"secret_providers,omitempty"`
+	Remote            RemoteConfig              `json:"remote,omitempty"`
+	Notify            NotifyConfig              `json:"notify,omitempty"`
+	PermissionUpgrade PermissionUpgradeConfig   `json:"permission_upgrade,omitempty"`
+}
+
+// PermissionUpgradeConfig tunes the per-agent guards for permission-upgrade
+// requests. Defaults: 5 requests / hour / agent, base URL empty (notify
+// won't include approve/diff URLs unless set).
+type PermissionUpgradeConfig struct {
+	RateLimitPerHour int    `json:"rate_limit_per_hour,omitempty"`
+	BaseURL          string `json:"base_url,omitempty"` // e.g. "https://capbroker.crawley.systems"
 }
 
 type Defaults struct {
