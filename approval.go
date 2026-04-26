@@ -27,6 +27,31 @@ func ensureApproved(cfg *Config, stateDir string, req Request, profile Profile) 
 		}
 	}
 
+	// Auto-approve lease (file-based, time-bounded — see auto_approve.go).
+	// Checked before any prompt so an operator who's away from the keyboard
+	// can pre-authorize a short window of approvals. Hard-capped at
+	// MaxAutoApproveTTL so a forgotten lease can't last all day.
+	if lease, active := readAutoApproveLease(stateDir, now); active {
+		approvedTrue := true
+		_ = appendAudit(stateDir, AuditEvent{
+			Event:       "auto_approve_lease_used",
+			Agent:       req.Agent,
+			Profile:     req.Profile,
+			Resource:    req.Resource,
+			Reason:      req.Reason,
+			Command:     req.Command,
+			RequestHash: requestHash(req),
+			Approved:    &approvedTrue,
+			Message: fmt.Sprintf("auto-approve lease active until %s; lease reason=%q",
+				lease.ExpiresAt.Format(time.RFC3339), lease.Reason),
+		})
+		if critical {
+			return ephemeralGrant(req, sessionTTL, now, "auto_approve_critical"), true, nil
+		}
+		grant, err := createGrant(stateDir, req, sessionTTL, now)
+		return grant, true, err
+	}
+
 	approved, err := promptApproval(req, profile, sessionTTL, critical, time.Duration(cfg.Defaults.ApprovalTimeoutSeconds)*time.Second)
 	if err != nil {
 		return Grant{}, false, err
