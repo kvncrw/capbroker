@@ -64,6 +64,8 @@ func runRemoteServer(cfg *Config, stateDir, addr string, allowUnsignedDecision, 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/requests", server.handleRequests)
 	mux.HandleFunc("/v1/requests/", server.handleRequestByID)
+	mux.HandleFunc("/u/", server.handleUpgradeUI)
+	mux.HandleFunc("/v1/upgrades/", server.handleUpgradeAPI)
 	return http.ListenAndServe(addr, mux)
 }
 
