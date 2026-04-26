@@ -2,7 +2,11 @@
 
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestMatchesAny(t *testing.T) {
 	t.Parallel()
@@ -193,5 +197,219 @@ func TestValidateRequestVaultProfile(t *testing.T) {
 		VaultRef: "example-org/example-repo",
 	}, false); err == nil {
 		t.Fatal("expected vault kind against command profile to be denied")
+	}
+}
+
+const goodReason = "screenshot mission needs API pod logs to diagnose missing thumbnails"
+
+func TestValidatePermissionUpgradeProfile(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Version: configVersion,
+		Profiles: map[string]Profile{
+			"permission-upgrade": {
+				Kind:       requestKindPermissionUpgrade,
+				Agents:     []string{"hermes"},
+				Resources:  []string{"k8s-read", "github-review"},
+				TTLSeconds: 60,
+			},
+			"k8s-read": {
+				Agents:          []string{"hermes"},
+				Resources:       []string{"namespace/kestrel"},
+				TTLSeconds:      60,
+				AllowedCommands: [][]string{{"kubectl", "get"}},
+			},
+			"meta-extender": {
+				Kind:       requestKindPermissionUpgrade,
+				Agents:     []string{"hermes"},
+				Resources:  []string{"permission-upgrade"}, // tries to allow extending the meta-profile
+				TTLSeconds: 60,
+			},
+		},
+	}
+
+	// Happy path: ask to extend k8s-read with namespace/basilisk, mode=once.
+	if _, err := cfg.validateRequest(Request{
+		Kind:           requestKindPermissionUpgrade,
+		Agent:          "hermes",
+		Profile:        "permission-upgrade",
+		Resource:       "k8s-read",
+		Reason:         goodReason,
+		TargetProfile:  "k8s-read",
+		TargetResource: "namespace/basilisk",
+		GrantMode:      grantModeOnce,
+	}, false); err != nil {
+		t.Fatalf("happy path should pass, got %v", err)
+	}
+
+	// Missing target_profile.
+	if _, err := cfg.validateRequest(Request{
+		Kind:           requestKindPermissionUpgrade,
+		Agent:          "hermes",
+		Profile:        "permission-upgrade",
+		Resource:       "k8s-read",
+		Reason:         goodReason,
+		TargetResource: "namespace/x",
+		GrantMode:      grantModeOnce,
+	}, false); err == nil {
+		t.Fatal("expected missing target_profile to be rejected")
+	}
+
+	// Resource mismatch (Resource != TargetProfile).
+	if _, err := cfg.validateRequest(Request{
+		Kind:           requestKindPermissionUpgrade,
+		Agent:          "hermes",
+		Profile:        "permission-upgrade",
+		Resource:       "k8s-read",
+		Reason:         goodReason,
+		TargetProfile:  "github-review", // resource and target_profile must match
+		TargetResource: "kvncrw/x",
+		GrantMode:      grantModeOnce,
+	}, false); err == nil {
+		t.Fatal("expected resource/target_profile mismatch to be rejected")
+	}
+
+	// Target profile not in meta-profile resources allowlist.
+	if _, err := cfg.validateRequest(Request{
+		Kind:           requestKindPermissionUpgrade,
+		Agent:          "hermes",
+		Profile:        "permission-upgrade",
+		Resource:       "bsm-fetch", // not in resources
+		Reason:         goodReason,
+		TargetProfile:  "bsm-fetch",
+		TargetResource: "abc",
+		GrantMode:      grantModeOnce,
+	}, false); err == nil {
+		t.Fatal("expected unlisted target profile to be rejected")
+	}
+
+	// Self-extension blocked: meta-extender lists permission-upgrade as a target.
+	if _, err := cfg.validateRequest(Request{
+		Kind:           requestKindPermissionUpgrade,
+		Agent:          "hermes",
+		Profile:        "meta-extender",
+		Resource:       "permission-upgrade",
+		Reason:         goodReason,
+		TargetProfile:  "permission-upgrade",
+		TargetResource: "k8s-read",
+		GrantMode:      grantModePermanent,
+	}, false); err == nil {
+		t.Fatal("expected self-extension of permission-upgrade kind to be rejected")
+	}
+
+	// Glob target_resource rejected.
+	for _, glob := range []string{"namespace/*", "ns?", "abc[def]"} {
+		if _, err := cfg.validateRequest(Request{
+			Kind:           requestKindPermissionUpgrade,
+			Agent:          "hermes",
+			Profile:        "permission-upgrade",
+			Resource:       "k8s-read",
+			Reason:         goodReason,
+			TargetProfile:  "k8s-read",
+			TargetResource: glob,
+			GrantMode:      grantModeOnce,
+		}, false); err == nil {
+			t.Fatalf("expected glob target_resource %q to be rejected", glob)
+		}
+	}
+
+	// Reason too short.
+	if _, err := cfg.validateRequest(Request{
+		Kind:           requestKindPermissionUpgrade,
+		Agent:          "hermes",
+		Profile:        "permission-upgrade",
+		Resource:       "k8s-read",
+		Reason:         strings.Repeat("x", 10),
+		TargetProfile:  "k8s-read",
+		TargetResource: "namespace/y",
+		GrantMode:      grantModeOnce,
+	}, false); err == nil {
+		t.Fatal("expected too-short reason to be rejected")
+	}
+
+	// Bad grant mode.
+	if _, err := cfg.validateRequest(Request{
+		Kind:           requestKindPermissionUpgrade,
+		Agent:          "hermes",
+		Profile:        "permission-upgrade",
+		Resource:       "k8s-read",
+		Reason:         goodReason,
+		TargetProfile:  "k8s-read",
+		TargetResource: "namespace/y",
+		GrantMode:      "forever",
+	}, false); err == nil {
+		t.Fatal("expected unknown grant_mode to be rejected")
+	}
+
+	// Command must be empty for upgrade requests.
+	if _, err := cfg.validateRequest(Request{
+		Kind:           requestKindPermissionUpgrade,
+		Agent:          "hermes",
+		Profile:        "permission-upgrade",
+		Resource:       "k8s-read",
+		Reason:         goodReason,
+		TargetProfile:  "k8s-read",
+		TargetResource: "namespace/y",
+		GrantMode:      grantModeOnce,
+		Command:        []string{"kubectl", "delete", "pod", "x"},
+	}, false); err == nil {
+		t.Fatal("expected command on upgrade request to be rejected")
+	}
+}
+
+func TestValidateRequestAtUsesDynamicGrants(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := &Config{
+		Version: configVersion,
+		Profiles: map[string]Profile{
+			"k8s-read": {
+				Agents:          []string{"hermes"},
+				Resources:       []string{"namespace/kestrel"}, // namespace/basilisk NOT static-listed
+				TTLSeconds:      60,
+				AllowedCommands: [][]string{{"kubectl", "get"}},
+			},
+		},
+	}
+	now := time.Now().UTC()
+
+	// Without grants, namespace/basilisk is denied.
+	if _, err := cfg.validateRequestAt(Request{
+		Agent:    "hermes",
+		Profile:  "k8s-read",
+		Resource: "namespace/basilisk",
+		Command:  []string{"kubectl", "get", "pods"},
+	}, true, dir, now); err == nil {
+		t.Fatal("expected namespace/basilisk to be denied without a grant")
+	}
+
+	// Add a permanent grant.
+	if err := appendPermanentGrant(dir, permissionGrant{
+		TargetProfile:  "k8s-read",
+		TargetResource: "namespace/basilisk",
+		GrantedAt:      now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now it should pass.
+	if _, err := cfg.validateRequestAt(Request{
+		Agent:    "hermes",
+		Profile:  "k8s-read",
+		Resource: "namespace/basilisk",
+		Command:  []string{"kubectl", "get", "pods"},
+	}, true, dir, now); err != nil {
+		t.Fatalf("expected granted resource to be allowed, got %v", err)
+	}
+
+	// Plain validateRequest (no stateDir) should still deny — confirms the
+	// dynamic extension is opt-in via validateRequestAt, not a global change.
+	if _, err := cfg.validateRequest(Request{
+		Agent:    "hermes",
+		Profile:  "k8s-read",
+		Resource: "namespace/basilisk",
+		Command:  []string{"kubectl", "get", "pods"},
+	}, true); err == nil {
+		t.Fatal("validateRequest (no stateDir) should not honor dynamic grants")
 	}
 }

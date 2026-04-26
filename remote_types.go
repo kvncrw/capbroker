@@ -16,10 +16,21 @@ const (
 // Request kinds. "command" is the original flow (broker injects env/files,
 // client exec's a command locally). "vault" runs a vault read on the
 // authority and returns just the secret value; the client never sees the
-// vault token.
+// vault token. "permission-upgrade" asks the operator to extend a target
+// profile's allowlist with a new resource — the agent doesn't get any
+// secret/value back, just confirmation that future requests for the
+// resource will succeed.
 const (
-	requestKindCommand = "command"
-	requestKindVault   = "vault"
+	requestKindCommand           = "command"
+	requestKindVault             = "vault"
+	requestKindPermissionUpgrade = "permission-upgrade"
+)
+
+// Permission-upgrade grant lifetimes.
+const (
+	grantModeOnce      = "once"      // TTL-bound (default 24h)
+	grantModeSession   = "session"   // bound to operator-session lifetime
+	grantModePermanent = "permanent" // persisted to permanent-grants.jsonl
 )
 
 type RemoteRequest struct {
@@ -32,6 +43,10 @@ type RemoteRequest struct {
 	Command           []string        `json:"command"`
 	VaultRef          string          `json:"vault_ref,omitempty"`
 	VaultField        string          `json:"vault_field,omitempty"`
+	TargetProfile     string          `json:"target_profile,omitempty"`      // permission-upgrade only
+	TargetResource    string          `json:"target_resource,omitempty"`     // permission-upgrade only
+	GrantMode         string          `json:"grant_mode,omitempty"`          // permission-upgrade only
+	OriginalRequestID string          `json:"original_request_id,omitempty"` // permission-upgrade audit chain
 	SessionTTLSeconds int             `json:"session_ttl_seconds,omitempty"`
 	ClientPublicKey   string          `json:"client_public_key"`
 	Status            string          `json:"status"`
@@ -52,6 +67,10 @@ func (r RemoteRequest) Request() Request {
 		Command:           r.Command,
 		VaultRef:          r.VaultRef,
 		VaultField:        r.VaultField,
+		TargetProfile:     r.TargetProfile,
+		TargetResource:    r.TargetResource,
+		GrantMode:         r.GrantMode,
+		OriginalRequestID: r.OriginalRequestID,
 		SessionTTLSeconds: r.SessionTTLSeconds,
 	}
 }
@@ -65,6 +84,10 @@ type RemoteRequestCreate struct {
 	Command           []string `json:"command"`
 	VaultRef          string   `json:"vault_ref,omitempty"`
 	VaultField        string   `json:"vault_field,omitempty"`
+	TargetProfile     string   `json:"target_profile,omitempty"`
+	TargetResource    string   `json:"target_resource,omitempty"`
+	GrantMode         string   `json:"grant_mode,omitempty"`
+	OriginalRequestID string   `json:"original_request_id,omitempty"`
 	SessionTTLSeconds int      `json:"session_ttl_seconds,omitempty"`
 	ClientPublicKey   string   `json:"client_public_key"`
 }
@@ -93,8 +116,9 @@ type LeasePayload struct {
 	Resource    string            `json:"resource"`
 	Reason      string            `json:"reason"`
 	Command     []string          `json:"command"`
-	ExpiresAt   time.Time         `json:"expires_at"`
-	SecretValue string            `json:"secret_value,omitempty"` // vault-fetch only
+	ExpiresAt      time.Time         `json:"expires_at"`
+	SecretValue    string            `json:"secret_value,omitempty"`    // vault-fetch only
+	UpgradeGranted string            `json:"upgrade_granted,omitempty"` // permission-upgrade: "once:24h0m0s" | "session" | "permanent"
 }
 
 func decisionSigningPayload(requestID string, decision RemoteDecision) []byte {
