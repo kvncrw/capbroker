@@ -17,6 +17,28 @@ type capbrokerServer struct {
 	store                 remoteStore
 	allowUnsignedDecision bool
 	localApprove          bool
+
+	// Permission-upgrade per-agent guards. Created on first server use;
+	// shared across the lifetime of the daemon.
+	upgradeRateLimit *rateLimiter
+	upgradeDedup     *reasonDedupCache
+}
+
+// upgradeGuards lazy-initializes the rate-limit and dedup primitives the
+// first time they're needed and returns them. Splitting out so server
+// struct literals (e.g. tests) don't have to know about them.
+func (s *capbrokerServer) upgradeGuards() (*rateLimiter, *reasonDedupCache) {
+	if s.upgradeRateLimit == nil {
+		limit := 5
+		if s.cfg != nil && s.cfg.PermissionUpgrade.RateLimitPerHour > 0 {
+			limit = s.cfg.PermissionUpgrade.RateLimitPerHour
+		}
+		s.upgradeRateLimit = newRateLimiter(limit, time.Hour)
+	}
+	if s.upgradeDedup == nil {
+		s.upgradeDedup = newReasonDedupCache()
+	}
+	return s.upgradeRateLimit, s.upgradeDedup
 }
 
 func runRemoteServer(cfg *Config, stateDir, addr string, allowUnsignedDecision, localApprove bool) error {
@@ -115,6 +137,30 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusForbidden, "vault requests require a local-approve daemon (signed-approver flow does not support authority-side execution)")
 		return
 	}
+	// Permission-upgrade requests have additional anti-spam guards: a
+	// per-agent rate limit (default 5/hour) and a reason-dedup window
+	// so an agent can't slam the operator with the same justification
+	// repeatedly. These run AFTER policy validation so a malformed
+	// upgrade request returns 403 (informative) before the rate-limit
+	// counter gets bumped.
+	if req.Kind == requestKindPermissionUpgrade {
+		if !s.localApprove {
+			writeError(w, http.StatusForbidden, "permission-upgrade requests require a local-approve daemon")
+			return
+		}
+		rl, dedup := s.upgradeGuards()
+		ok, retry := rl.allow(req.Agent, time.Now())
+		if !ok {
+			w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retry.Seconds()))
+			writeError(w, http.StatusTooManyRequests, fmt.Sprintf("permission-upgrade rate limit exceeded for agent %q (retry in %s)", req.Agent, retry.Round(time.Second)))
+			return
+		}
+		dedupKey := req.Agent + "|" + req.TargetProfile + "|" + req.TargetResource + "|" + req.Reason
+		if !dedup.markIfFresh(dedupKey, time.Now()) {
+			writeError(w, http.StatusBadRequest, "duplicate upgrade request — provide a fresh justification or wait for the previous request to be decided")
+			return
+		}
+	}
 	if err := validateLeaseRecipientPublicKey(create.ClientPublicKey); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -158,6 +204,28 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		RequestHash: requestHash(req),
 		GrantID:     remoteReq.ID,
 	})
+	// Permission-upgrade requests get an additional, more-informative
+	// audit event AND a notification dispatch. Both are best-effort
+	// (failures don't fail the POST — the operator can still decide
+	// via the HTTP form/CLI even if Pushover is down).
+	if req.Kind == requestKindPermissionUpgrade {
+		_ = appendAudit(s.stateDir, AuditEvent{
+			Event:       "permission_upgrade_requested",
+			Agent:       req.Agent,
+			Profile:     req.Profile,
+			Resource:    req.Resource,
+			Reason:      req.Reason,
+			RequestHash: requestHash(req),
+			GrantID:     remoteReq.ID,
+			Message: fmt.Sprintf("agent wants %s += %q (mode=%s) — original=%s",
+				req.TargetProfile, req.TargetResource, req.GrantMode, req.OriginalRequestID),
+		})
+		go func(rr RemoteRequest) {
+			if err := notifyPermissionUpgrade(s.cfg, rr, s.cfg.PermissionUpgrade.BaseURL, nil); err != nil {
+				fmt.Fprintf(os.Stderr, "capbroker: notify permission-upgrade %s: %v\n", rr.ID, err)
+			}
+		}(remoteReq)
+	}
 	writeJSON(w, http.StatusCreated, remoteReq)
 }
 

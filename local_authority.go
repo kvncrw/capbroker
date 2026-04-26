@@ -19,6 +19,18 @@ func (s *capbrokerServer) localDecideRequest(remoteReq RemoteRequest) {
 		s.localDeny(remoteReq.ID, "local policy denied: "+err.Error())
 		return
 	}
+	// Permission-upgrade requests are HIGH-STAKES (extending the
+	// allowlist) and the operator's choice is not boolean (one of
+	// once/session/permanent/deny). They DO NOT auto-approve via
+	// active grant or auto-approve lease, and they DO NOT use
+	// promptApproval here. They sit pending until the operator
+	// decides via the HTTP review form (PR 12) or `capbroker
+	// review-upgrades` CLI (PR 13). Notification has already fired
+	// from createRequest at this point.
+	if req.Kind == requestKindPermissionUpgrade {
+		_ = profile // validation already verified the meta-profile
+		return
+	}
 	sessionTTL := requestedSessionTTL(s.cfg, profile, req)
 	critical := requestIsCritical(profile, req)
 	if !critical {

@@ -225,10 +225,15 @@ func TestPermissionUpgradeRequestPersistsAllFields(t *testing.T) {
 			},
 		},
 	}
+	// Permission-upgrade requests require a local-approve daemon (the
+	// signed-approver flow can't decide them). The test server simulates
+	// the daemon by setting localApprove=true; localDecideRequest leaves
+	// upgrade kind pending so we just verify the POST persists fields.
 	server := capbrokerServer{
-		cfg:      cfg,
-		stateDir: t.TempDir(),
-		store:    newRemoteStore(t.TempDir()),
+		cfg:          cfg,
+		stateDir:     t.TempDir(),
+		store:        newRemoteStore(t.TempDir()),
+		localApprove: true,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/requests", server.handleRequests)
