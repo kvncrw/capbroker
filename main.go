@@ -28,6 +28,8 @@ func main() {
 		cmdRun(os.Args[2:])
 	case "remote-run":
 		cmdRemoteRun(os.Args[2:])
+	case "vault-fetch":
+		cmdVaultFetch(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
 	case "approve":
@@ -362,6 +364,32 @@ func cmdRemoteRun(args []string) {
 	os.Exit(runRemoteCommand(*server, req, *wait, *interval))
 }
 
+func cmdVaultFetch(args []string) {
+	fs := flag.NewFlagSet("vault-fetch", flag.ExitOnError)
+	server := fs.String("server", "", "capbrokerd server URL (or CAPBROKER_SERVER)")
+	agent := fs.String("agent", "unknown", "agent name")
+	profileName := fs.String("profile", "", "vault profile (e.g. bsm-fetch, bw-fetch)")
+	ref := fs.String("ref", "", "vault reference: BSM secret UUID or bw item name")
+	field := fs.String("field", "", "bw vault field (password|username|notes|totp); ignored for bsm")
+	reason := fs.String("reason", "", "approval reason for audit")
+	wait := fs.Duration("wait", 5*time.Minute, "approval wait timeout")
+	interval := fs.Duration("interval", 2*time.Second, "approval poll interval")
+	_ = fs.Parse(args)
+	if *profileName == "" || *ref == "" {
+		die(fmt.Errorf("vault-fetch requires --profile and --ref"))
+	}
+	req := Request{
+		Kind:       requestKindVault,
+		Agent:      *agent,
+		Profile:    *profileName,
+		Resource:   *ref, // server enforces Resource == VaultRef
+		Reason:     *reason,
+		VaultRef:   *ref,
+		VaultField: *field,
+	}
+	os.Exit(runVaultFetch(*server, req, *wait, *interval))
+}
+
 func cmdDoctor(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	configPath := fs.String("config", "", "config path")
@@ -430,6 +458,7 @@ Commands:
   capbroker serve [--addr ADDR] [--state-dir PATH]
   capbroker approve --server URL --key PATH [--watch]
   capbroker remote-run --server URL --agent AGENT --profile PROFILE --resource RESOURCE [--reason TEXT] -- COMMAND [ARGS...]
+  capbroker vault-fetch --server URL --agent AGENT --profile PROFILE --ref REF [--field FIELD] [--reason TEXT]
   capbroker grants [--active=true]
   capbroker revoke --id GRANT_ID | --all
   capbroker auto-approve enable [--ttl 30m] [--idle-window 5m] [--reason TEXT]

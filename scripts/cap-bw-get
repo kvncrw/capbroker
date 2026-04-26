@@ -1,0 +1,46 @@
+#!/usr/bin/env sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Brokered Bitwarden CLI vault read.
+#
+# Usage:
+#   cap-bw-get <field> "<exact item name>"
+#   cap-bw-get password "2captcha.com"
+#   cap-bw-get notes    "wasabi kf archive.today"
+#
+# field is one of: password | username | notes | totp (must be in the
+# bw-fetch profile's vault_fields allowlist on the authority).
+#
+# The authority runs `bw get <field> <item>` against its own unlocked
+# bw vault and returns ONLY the field value. BW_SESSION never reaches
+# this host. If the authority's vault is locked the call fails closed.
+set -eu
+
+server_file="${CAPBROKER_SERVER_FILE:-/opt/data/capbroker-server}"
+if [ -z "${CAPBROKER_SERVER:-}" ] && [ -f "$server_file" ]; then
+  CAPBROKER_SERVER="$(sed -n '1p' "$server_file")"
+  export CAPBROKER_SERVER
+fi
+
+if [ -z "${CAPBROKER_SERVER:-}" ]; then
+  echo "cap-bw-get requires CAPBROKER_SERVER or $server_file" >&2
+  exit 2
+fi
+
+field="${1:-}"
+ref="${2:-}"
+
+if [ -z "$field" ] || [ -z "$ref" ]; then
+  echo "cap-bw-get requires <field> and <item-name>" >&2
+  echo "usage: cap-bw-get <password|username|notes|totp> \"<exact item name>\"" >&2
+  exit 2
+fi
+
+reason="${CAPBROKER_REASON:-bw $field $ref}"
+
+exec capbroker vault-fetch \
+  --agent "${CAPBROKER_AGENT:-remote-agent}" \
+  --profile "${CAPBROKER_PROFILE:-bw-fetch}" \
+  --ref "$ref" \
+  --field "$field" \
+  --reason "$reason"

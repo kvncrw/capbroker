@@ -1,0 +1,42 @@
+#!/usr/bin/env sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Brokered Bitwarden Secrets Manager (BSM) read.
+#
+# Usage:
+#   cap-bsm-get <UUID>
+#
+# Sends a vault-fetch request to the capbroker authority. The authority
+# runs `bws secret get <UUID>` server-side and returns ONLY the secret
+# value (encrypted with our ephemeral pubkey). The BWS access token
+# never crosses the wire to this host.
+#
+# Output: secret value to stdout, no trailing newline. Status messages
+# go to stderr so `cap-bsm-get UUID > out.txt` works as expected.
+set -eu
+
+server_file="${CAPBROKER_SERVER_FILE:-/opt/data/capbroker-server}"
+if [ -z "${CAPBROKER_SERVER:-}" ] && [ -f "$server_file" ]; then
+  CAPBROKER_SERVER="$(sed -n '1p' "$server_file")"
+  export CAPBROKER_SERVER
+fi
+
+if [ -z "${CAPBROKER_SERVER:-}" ]; then
+  echo "cap-bsm-get requires CAPBROKER_SERVER or $server_file" >&2
+  exit 2
+fi
+
+ref="${1:-}"
+if [ -z "$ref" ]; then
+  echo "cap-bsm-get requires a BSM secret UUID" >&2
+  echo "usage: cap-bsm-get <UUID>" >&2
+  exit 2
+fi
+
+reason="${CAPBROKER_REASON:-bsm $ref}"
+
+exec capbroker vault-fetch \
+  --agent "${CAPBROKER_AGENT:-remote-agent}" \
+  --profile "${CAPBROKER_PROFILE:-bsm-fetch}" \
+  --ref "$ref" \
+  --reason "$reason"
