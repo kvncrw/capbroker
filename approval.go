@@ -23,15 +23,25 @@ func ensureApproved(cfg *Config, stateDir string, req Request, profile Profile) 
 		if grant, err := activeGrant(stateDir, req, now); err != nil {
 			return Grant{}, false, err
 		} else if grant != nil {
+			// Reusing an active operator-session grant is itself "activity"
+			// for the auto-approve lease. Without renewing here, a busy run
+			// served by one session would let the lease quietly age out and
+			// the next new scope/resource would prompt unexpectedly.
+			_, _ = renewAutoApproveLease(stateDir, now)
 			return *grant, false, nil
 		}
 	}
 
 	// Auto-approve lease (file-based, time-bounded — see auto_approve.go).
 	// Checked before any prompt so an operator who's away from the keyboard
-	// can pre-authorize a short window of approvals. Hard-capped at
-	// MaxAutoApproveTTL (currently 30m) so a forgotten lease can't last all day.
+	// can pre-authorize a short window of approvals. Each successful use
+	// rolling-renews ExpiresAt forward by IdleWindow (default 5m), capped at
+	// MaxExpiresAt (≤MaxAutoApproveTTL=30m from enable). Means continuous
+	// activity keeps the lease alive; idle gaps expire it within minutes.
 	if lease, active := readAutoApproveLease(stateDir, now); active {
+		if renewed, changed := renewAutoApproveLease(stateDir, now); changed {
+			lease = renewed
+		}
 		approvedTrue := true
 		_ = appendAudit(stateDir, AuditEvent{
 			Event:       "auto_approve_lease_used",
@@ -42,8 +52,10 @@ func ensureApproved(cfg *Config, stateDir string, req Request, profile Profile) 
 			Command:     req.Command,
 			RequestHash: requestHash(req),
 			Approved:    &approvedTrue,
-			Message: fmt.Sprintf("auto-approve lease active until %s; lease reason=%q",
-				lease.ExpiresAt.Format(time.RFC3339), lease.Reason),
+			Message: fmt.Sprintf("auto-approve lease active until %s (max %s); lease reason=%q",
+				lease.ExpiresAt.Format(time.RFC3339),
+				lease.MaxExpiresAt.Format(time.RFC3339),
+				lease.Reason),
 		})
 		if critical {
 			return ephemeralGrant(req, sessionTTL, now, "auto_approve_critical"), true, nil
