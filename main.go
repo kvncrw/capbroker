@@ -65,7 +65,7 @@ func cmdAutoApprove(args []string) {
 func cmdAutoApproveEnable(args []string) {
 	fs := flag.NewFlagSet("auto-approve enable", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "state directory")
-	ttlValue := fs.String("ttl", "10m", fmt.Sprintf("lease TTL, hard-capped at %s", MaxAutoApproveTTL))
+	ttlValue := fs.String("ttl", "30m", fmt.Sprintf("lease TTL, hard-capped at %s", MaxAutoApproveTTL))
 	reason := fs.String("reason", "", "human-readable why (logged to audit and stored in the lease)")
 	_ = fs.Parse(args)
 	ttl, err := time.ParseDuration(*ttlValue)
@@ -428,7 +428,7 @@ Commands:
   capbroker remote-run --server URL --agent AGENT --profile PROFILE --resource RESOURCE [--reason TEXT] -- COMMAND [ARGS...]
   capbroker grants [--active=true]
   capbroker revoke --id GRANT_ID | --all
-  capbroker auto-approve enable [--ttl 10m] [--reason TEXT]
+  capbroker auto-approve enable [--ttl 30m] [--reason TEXT]
   capbroker auto-approve disable
   capbroker auto-approve status`)
 }
