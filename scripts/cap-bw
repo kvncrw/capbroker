@@ -1,0 +1,69 @@
+#!/usr/bin/env sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Brokered Bitwarden CLI vault read.
+#
+# Usage:
+#   cap-bw get item "<exact item name>"
+#   cap-bw get password "<exact item name>"
+#   cap-bw get username "<exact item name>"
+#   cap-bw get notes <id-or-name>
+#   cap-bw get totp <id-or-name>
+#   cap-bw list items --search <q>
+#
+# The item name is auto-derived as the last positional arg (or the value
+# after --search for list). Capbroker resolves BW_SESSION from
+# bw_session_from_xdg (~/.local/state/bw-v/session). Vault must be
+# unlocked (! bw-v in operator terminal) — locked vault returns empty
+# session and the operation fails closed.
+set -eu
+
+server_file="${CAPBROKER_SERVER_FILE:-/opt/data/capbroker-server}"
+if [ -z "${CAPBROKER_SERVER:-}" ] && [ -f "$server_file" ]; then
+  CAPBROKER_SERVER="$(sed -n '1p' "$server_file")"
+  export CAPBROKER_SERVER
+fi
+
+if [ -z "${CAPBROKER_SERVER:-}" ]; then
+  echo "cap-bw requires CAPBROKER_SERVER or $server_file" >&2
+  exit 2
+fi
+
+resource=""
+case "${1:-} ${2:-}" in
+  "get item"*|"get password"*|"get username"*|"get notes"*|"get totp"*)
+    # Item identifier is arg #3 (and may be multi-word, requoted by shell)
+    resource="${3:-}"
+    ;;
+  "list items"*)
+    # Pull the value after --search for narrower audit; otherwise mark broad.
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--search" ]; then
+        resource="search/$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    [ -z "$resource" ] && resource="bw/list"
+    ;;
+esac
+
+if [ -z "$resource" ]; then
+  echo "cap-bw requires get item|password|username|notes|totp <name>, or list items --search <q>" >&2
+  exit 2
+fi
+
+reason="${CAPBROKER_REASON:-bw $*}"
+ttl_args=""
+if [ -n "${CAPBROKER_SESSION_TTL:-}" ]; then
+  ttl_args="--session-ttl ${CAPBROKER_SESSION_TTL}"
+fi
+# shellcheck disable=SC2086
+exec capbroker remote-run \
+  --agent "${CAPBROKER_AGENT:-remote-agent}" \
+  --profile "${CAPBROKER_PROFILE:-bw-read}" \
+  --resource "$resource" \
+  --reason "$reason" \
+  $ttl_args \
+  -- bw "$@"
