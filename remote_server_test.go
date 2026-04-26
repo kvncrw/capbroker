@@ -201,6 +201,72 @@ func TestRemoteServerVaultFetchFlow(t *testing.T) {
 	}
 }
 
+func TestPermissionUpgradeRequestPersistsAllFields(t *testing.T) {
+	t.Parallel()
+	// Regression for the createRequest constructor losing target_profile,
+	// target_resource, grant_mode, and original_request_id when copying
+	// RemoteRequestCreate -> Request and -> RemoteRequest. Without those
+	// fields propagating, validateRequestAt would reject every upgrade
+	// request as missing target_profile, and even successful POSTs would
+	// store an upgrade record with no target metadata.
+	cfg := &Config{
+		Profiles: map[string]Profile{
+			"permission-upgrade": {
+				Kind:       requestKindPermissionUpgrade,
+				Agents:     []string{"hermes"},
+				Resources:  []string{"k8s-read"},
+				TTLSeconds: 60,
+			},
+			"k8s-read": {
+				Agents:          []string{"hermes"},
+				Resources:       []string{"namespace/kestrel"},
+				TTLSeconds:      60,
+				AllowedCommands: [][]string{{"kubectl", "get"}},
+			},
+		},
+	}
+	server := capbrokerServer{
+		cfg:      cfg,
+		stateDir: t.TempDir(),
+		store:    newRemoteStore(t.TempDir()),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/requests", server.handleRequests)
+	mux.HandleFunc("/v1/requests/", server.handleRequestByID)
+
+	_, clientPub, err := generateLeaseRecipientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created RemoteRequest
+	if err := performJSON(mux, http.MethodPost, "/v1/requests", RemoteRequestCreate{
+		Kind:              requestKindPermissionUpgrade,
+		Agent:             "hermes",
+		Profile:           "permission-upgrade",
+		Resource:          "k8s-read",
+		Reason:            "screenshot mission needs API pod logs to diagnose missing thumbnails",
+		TargetProfile:     "k8s-read",
+		TargetResource:    "namespace/basilisk",
+		GrantMode:         grantModeOnce,
+		OriginalRequestID: "req_originating_403",
+		ClientPublicKey:   clientPub,
+	}, &created); err != nil {
+		t.Fatalf("upgrade POST should succeed validation, got %v", err)
+	}
+	if created.TargetProfile != "k8s-read" {
+		t.Fatalf("TargetProfile not persisted, got %q", created.TargetProfile)
+	}
+	if created.TargetResource != "namespace/basilisk" {
+		t.Fatalf("TargetResource not persisted, got %q", created.TargetResource)
+	}
+	if created.GrantMode != grantModeOnce {
+		t.Fatalf("GrantMode not persisted, got %q", created.GrantMode)
+	}
+	if created.OriginalRequestID != "req_originating_403" {
+		t.Fatalf("OriginalRequestID not persisted, got %q", created.OriginalRequestID)
+	}
+}
+
 func TestVaultRequestRejectedWithoutLocalApprove(t *testing.T) {
 	t.Parallel()
 	// Without --local-approve, an approver CLI handles decisions but its

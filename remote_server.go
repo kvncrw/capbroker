@@ -88,6 +88,10 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		Command:           create.Command,
 		VaultRef:          create.VaultRef,
 		VaultField:        create.VaultField,
+		TargetProfile:     create.TargetProfile,
+		TargetResource:    create.TargetResource,
+		GrantMode:         create.GrantMode,
+		OriginalRequestID: create.OriginalRequestID,
 		SessionTTLSeconds: create.SessionTTLSeconds,
 	}
 	// `needsCommand` is only meaningful for the command kind. Vault and
@@ -126,6 +130,10 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		Command:           create.Command,
 		VaultRef:          create.VaultRef,
 		VaultField:        create.VaultField,
+		TargetProfile:     create.TargetProfile,
+		TargetResource:    create.TargetResource,
+		GrantMode:         create.GrantMode,
+		OriginalRequestID: create.OriginalRequestID,
 		SessionTTLSeconds: create.SessionTTLSeconds,
 		ClientPublicKey:   create.ClientPublicKey,
 		Status:            remoteStatusPending,
