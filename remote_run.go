@@ -184,10 +184,12 @@ func runVaultFetch(server string, req Request, waitTimeout, pollInterval time.Du
 				fmt.Fprintln(os.Stderr, "capbroker: remote lease does not match requested capability")
 				return 1
 			}
-			if payload.SecretValue == "" {
-				fmt.Fprintln(os.Stderr, "capbroker: vault lease carried no secret value")
-				return 1
-			}
+			// An empty SecretValue is a legitimate outcome — vault items can
+			// hold empty strings (uninitialized password field, intentionally
+			// blank notes, etc.). We treat the approved-decision-with-empty-
+			// payload case as a successful fetch and let the caller decide
+			// how to handle it; the daemon's authority-side execution path
+			// is what enforces "this ref actually exists" upstream.
 			fmt.Fprintf(os.Stderr, "capbroker: vault request %s approved until %s\n", current.ID, payload.ExpiresAt.Format(time.RFC3339))
 			// stdout is the secret. No trailing newline — caller decides.
 			if _, err := os.Stdout.Write([]byte(payload.SecretValue)); err != nil {
