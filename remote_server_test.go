@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -197,6 +198,58 @@ func TestRemoteServerVaultFetchFlow(t *testing.T) {
 	}
 	if len(payload.Env) != 0 {
 		t.Fatalf("vault payload should not carry env, got %v", payload.Env)
+	}
+}
+
+func TestVaultRequestRejectedWithoutLocalApprove(t *testing.T) {
+	t.Parallel()
+	// Without --local-approve, an approver CLI handles decisions but its
+	// path (approvePendingOnce in remote_approve.go) only knows how to
+	// build command-style leases — vault requests would round-trip an
+	// empty SecretValue and silently look like success. Reject upfront.
+	cfg := &Config{
+		Profiles: map[string]Profile{
+			"bsm-fetch": {
+				Kind:       requestKindVault,
+				Vault:      "bsm",
+				VaultAuth:  "x",
+				Agents:     []string{"hermes"},
+				Resources:  []string{"abc"},
+				TTLSeconds: 60,
+			},
+		},
+	}
+	server := capbrokerServer{
+		cfg:          cfg,
+		stateDir:     t.TempDir(),
+		store:        newRemoteStore(t.TempDir()),
+		localApprove: false, // signed-approver mode
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/requests", server.handleRequests)
+	mux.HandleFunc("/v1/requests/", server.handleRequestByID)
+
+	_, clientPub, err := generateLeaseRecipientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(RemoteRequestCreate{
+		Kind:            requestKindVault,
+		Agent:           "hermes",
+		Profile:         "bsm-fetch",
+		Resource:        "abc",
+		VaultRef:        "abc",
+		ClientPublicKey: clientPub,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/requests", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rec.Result().StatusCode, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "vault requests require a local-approve daemon") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
 	}
 }
 

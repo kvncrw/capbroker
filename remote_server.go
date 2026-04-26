@@ -98,6 +98,17 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	// Vault requests can ONLY be approved by the local-approve daemon
+	// path. The signed-approver flow (approvePendingOnce in
+	// remote_approve.go) builds command-style leases via
+	// resolveProfileSecrets and never populates SecretValue — a vault
+	// request approved that way would round-trip an empty value and
+	// look like success to the client. Reject upfront so misconfigured
+	// deployments fail loudly instead of returning empty secrets.
+	if req.Kind == requestKindVault && !s.localApprove {
+		writeError(w, http.StatusForbidden, "vault requests require a local-approve daemon (signed-approver flow does not support authority-side execution)")
+		return
+	}
 	if err := validateLeaseRecipientPublicKey(create.ClientPublicKey); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

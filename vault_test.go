@@ -7,9 +7,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
+
+func itoa(n int) string { return strconv.Itoa(n) }
 
 func TestResolveVaultRefBSMHappyPath(t *testing.T) {
 	t.Parallel()
@@ -171,6 +175,27 @@ func TestVaultOutputCappedWriter(t *testing.T) {
 	}
 	if !w.exceeded {
 		t.Fatal("exceeded flag should be set")
+	}
+}
+
+func TestDefaultVaultExecutorFailsClosedOnOversizeOutput(t *testing.T) {
+	t.Parallel()
+	// Emit > 1 MiB on stdout via /bin/sh and assert the executor surfaces
+	// an oversize error rather than returning a silently-truncated value.
+	bigBytes := vaultOutputCap + 16
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := defaultVaultExecutor(
+		ctx,
+		"/bin/sh",
+		[]string{"-c", "printf '%*s' " + itoa(bigBytes) + " ''"},
+		[]string{"PATH=/bin:/usr/bin"},
+	)
+	if err == nil {
+		t.Fatalf("expected oversize-output error, got %d bytes ok", len(out))
+	}
+	if !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("expected 'exceeded' in error, got %v", err)
 	}
 }
 

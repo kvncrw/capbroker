@@ -37,19 +37,26 @@ var vaultDefaultExec vaultExecutor = defaultVaultExecutor
 
 // defaultVaultExecutor runs the binary with a clean env (only the vars the
 // caller passed) so the vault token cannot leak in via the daemon's
-// process env. Output is capped to vaultOutputCap.
+// process env. Output is capped to vaultOutputCap; the executor FAILS
+// CLOSED when either stream exceeds the cap — silently truncating
+// could ship a corrupted credential to the client.
 func defaultVaultExecutor(ctx context.Context, bin string, args []string, env []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = append([]string{}, env...) // clean env; do NOT leak ambient vars
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &cappedWriter{w: &stdout, cap: vaultOutputCap}
-	cmd.Stderr = &cappedWriter{w: &stderr, cap: vaultOutputCap}
+	stdoutCap := &cappedWriter{w: &stdout, cap: vaultOutputCap}
+	stderrCap := &cappedWriter{w: &stderr, cap: vaultOutputCap}
+	cmd.Stdout = stdoutCap
+	cmd.Stderr = stderrCap
 	if err := cmd.Run(); err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
 			errMsg = err.Error()
 		}
 		return nil, fmt.Errorf("%s exited %v: %s", bin, err, errMsg)
+	}
+	if stdoutCap.exceeded {
+		return nil, fmt.Errorf("%s output exceeded %d-byte cap", bin, vaultOutputCap)
 	}
 	return stdout.Bytes(), nil
 }
