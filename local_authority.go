@@ -9,10 +9,12 @@ import (
 
 func (s *capbrokerServer) localDecideRequest(remoteReq RemoteRequest) {
 	req := remoteReq.Request()
-	// `needsCommand` is meaningful only for command kind. Vault profiles
-	// have empty Command and validateRequest enforces that internally.
+	// `needsCommand` is meaningful only for command kind. Vault + upgrade
+	// profiles have empty Command and validateRequest enforces that.
 	needsCommand := req.Kind == "" || req.Kind == requestKindCommand
-	profile, err := s.cfg.validateRequest(req, needsCommand)
+	// Use validateRequestAt so dynamically-granted permissions count
+	// (permanent + non-expired temporal grants from the upgrade flow).
+	profile, err := s.cfg.validateRequestAt(req, needsCommand, s.stateDir, time.Now())
 	if err != nil {
 		s.localDeny(remoteReq.ID, "local policy denied: "+err.Error())
 		return

@@ -88,13 +88,19 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		Command:           create.Command,
 		VaultRef:          create.VaultRef,
 		VaultField:        create.VaultField,
+		TargetProfile:     create.TargetProfile,
+		TargetResource:    create.TargetResource,
+		GrantMode:         create.GrantMode,
+		OriginalRequestID: create.OriginalRequestID,
 		SessionTTLSeconds: create.SessionTTLSeconds,
 	}
-	// `needsCommand` is only meaningful for the command kind. Vault
-	// requests have an empty command and validateRequest enforces that
-	// internally based on profile.Kind.
+	// `needsCommand` is only meaningful for the command kind. Vault and
+	// permission-upgrade requests have empty commands and validateRequest
+	// enforces that internally based on profile.Kind.
 	needsCommand := req.Kind == "" || req.Kind == requestKindCommand
-	if _, err := s.cfg.validateRequest(req, needsCommand); err != nil {
+	// Pass stateDir + now so the validator can extend the allowlist with
+	// permanent / non-expired temporal grants persisted by the upgrade flow.
+	if _, err := s.cfg.validateRequestAt(req, needsCommand, s.stateDir, time.Now()); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -124,6 +130,10 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		Command:           create.Command,
 		VaultRef:          create.VaultRef,
 		VaultField:        create.VaultField,
+		TargetProfile:     create.TargetProfile,
+		TargetResource:    create.TargetResource,
+		GrantMode:         create.GrantMode,
+		OriginalRequestID: create.OriginalRequestID,
 		SessionTTLSeconds: create.SessionTTLSeconds,
 		ClientPublicKey:   create.ClientPublicKey,
 		Status:            remoteStatusPending,
