@@ -4,10 +4,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,6 +95,161 @@ func TestRemoteServerSignedDecisionFlow(t *testing.T) {
 	}
 	if payload.Env["GH_TOKEN"] != "secret-token" {
 		t.Fatalf("unexpected token %q", payload.Env["GH_TOKEN"])
+	}
+}
+
+func TestRemoteServerVaultFetchFlow(t *testing.T) {
+	// Cannot t.Parallel() — uses t.Setenv to skip the interactive prompt.
+	// Local-approve daemon flow: client posts a vault request, the
+	// localDecideRequest goroutine resolves the secret on the authority
+	// (mocked here via a file-typed SecretSource standing in for the
+	// vault subprocess), encrypts the value, returns it inside the lease.
+	dir := t.TempDir()
+	tokenFile := dir + "/bws.token"
+	if err := writeFileForTest(tokenFile, "fake-bws-access-token"); err != nil {
+		t.Fatal(err)
+	}
+	trim := true
+	cfg := &Config{
+		SecretSources: map[string]SecretSource{
+			"bws_access_token": {Type: "file", File: tokenFile, Trim: &trim},
+		},
+		Profiles: map[string]Profile{
+			"bsm-fetch": {
+				Kind:       requestKindVault,
+				Vault:      "bsm",
+				VaultAuth:  "bws_access_token",
+				Agents:     []string{"hermes"},
+				Resources:  []string{"5da84bec-9b21-4e7f-a720-b41b00cad9d5"},
+				TTLSeconds: 60,
+			},
+		},
+	}
+	server := capbrokerServer{
+		cfg:          cfg,
+		stateDir:     t.TempDir(),
+		store:        newRemoteStore(t.TempDir()),
+		localApprove: true,
+	}
+	// Skip the interactive prompt — promptApproval() short-circuits when
+	// CAPBROKER_AUTO_APPROVE=1. Cleaner than wiring a TTY mock.
+	t.Setenv("CAPBROKER_AUTO_APPROVE", "1")
+	// Replace the global executor for this test only. The default would
+	// shell out to a real bws binary; we want to assert the wiring.
+	oldExec := vaultDefaultExec
+	vaultDefaultExec = func(ctx context.Context, bin string, args []string, env []string) ([]byte, error) {
+		if bin != "bws" {
+			t.Errorf("expected bws, got %s", bin)
+		}
+		if !envContains(env, "BWS_ACCESS_TOKEN=fake-bws-access-token") {
+			t.Errorf("BWS_ACCESS_TOKEN not propagated: %v", env)
+		}
+		return []byte(`{"value":"basilisk"}`), nil
+	}
+	defer func() { vaultDefaultExec = oldExec }()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/requests", server.handleRequests)
+	mux.HandleFunc("/v1/requests/", server.handleRequestByID)
+
+	clientPriv, clientPub, err := generateLeaseRecipientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created RemoteRequest
+	if err := performJSON(mux, http.MethodPost, "/v1/requests", RemoteRequestCreate{
+		Kind:            requestKindVault,
+		Agent:           "hermes",
+		Profile:         "bsm-fetch",
+		Resource:        "5da84bec-9b21-4e7f-a720-b41b00cad9d5",
+		Reason:          "test",
+		VaultRef:        "5da84bec-9b21-4e7f-a720-b41b00cad9d5",
+		ClientPublicKey: clientPub,
+	}, &created); err != nil {
+		t.Fatal(err)
+	}
+
+	// localDecideRequest fires async — poll the store until status flips.
+	deadline := time.Now().Add(2 * time.Second)
+	var approved RemoteRequest
+	for time.Now().Before(deadline) {
+		var got RemoteRequest
+		if err := performJSON(mux, http.MethodGet, "/v1/requests/"+url.PathEscape(created.ID), nil, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != remoteStatusPending {
+			approved = got
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if approved.Status != remoteStatusApproved {
+		t.Fatalf("expected approved, got %s (message=%s)", approved.Status, approved.Message)
+	}
+	if approved.EncryptedLease == nil {
+		t.Fatal("expected encrypted lease")
+	}
+	payload, err := decryptLease(clientPriv, *approved.EncryptedLease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.SecretValue != "basilisk" {
+		t.Fatalf("expected basilisk in SecretValue, got %q", payload.SecretValue)
+	}
+	if len(payload.Env) != 0 {
+		t.Fatalf("vault payload should not carry env, got %v", payload.Env)
+	}
+}
+
+func TestVaultRequestRejectedWithoutLocalApprove(t *testing.T) {
+	t.Parallel()
+	// Without --local-approve, an approver CLI handles decisions but its
+	// path (approvePendingOnce in remote_approve.go) only knows how to
+	// build command-style leases — vault requests would round-trip an
+	// empty SecretValue and silently look like success. Reject upfront.
+	cfg := &Config{
+		Profiles: map[string]Profile{
+			"bsm-fetch": {
+				Kind:       requestKindVault,
+				Vault:      "bsm",
+				VaultAuth:  "x",
+				Agents:     []string{"hermes"},
+				Resources:  []string{"abc"},
+				TTLSeconds: 60,
+			},
+		},
+	}
+	server := capbrokerServer{
+		cfg:          cfg,
+		stateDir:     t.TempDir(),
+		store:        newRemoteStore(t.TempDir()),
+		localApprove: false, // signed-approver mode
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/requests", server.handleRequests)
+	mux.HandleFunc("/v1/requests/", server.handleRequestByID)
+
+	_, clientPub, err := generateLeaseRecipientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(RemoteRequestCreate{
+		Kind:            requestKindVault,
+		Agent:           "hermes",
+		Profile:         "bsm-fetch",
+		Resource:        "abc",
+		VaultRef:        "abc",
+		ClientPublicKey: clientPub,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/requests", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rec.Result().StatusCode, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "vault requests require a local-approve daemon") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
 	}
 }
 

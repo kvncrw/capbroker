@@ -9,7 +9,10 @@ import (
 
 func (s *capbrokerServer) localDecideRequest(remoteReq RemoteRequest) {
 	req := remoteReq.Request()
-	profile, err := s.cfg.validateRequest(req, true)
+	// `needsCommand` is meaningful only for command kind. Vault profiles
+	// have empty Command and validateRequest enforces that internally.
+	needsCommand := req.Kind == "" || req.Kind == requestKindCommand
+	profile, err := s.cfg.validateRequest(req, needsCommand)
 	if err != nil {
 		s.localDeny(remoteReq.ID, "local policy denied: "+err.Error())
 		return
@@ -46,22 +49,48 @@ func (s *capbrokerServer) localDecideRequest(remoteReq RemoteRequest) {
 }
 
 func (s *capbrokerServer) localApproveRequest(remoteReq RemoteRequest, profile Profile, message string) {
-	secrets, err := resolveProfileSecrets(s.cfg, profile)
-	if err != nil {
-		s.localDeny(remoteReq.ID, "secret resolution failed: "+err.Error())
-		return
-	}
 	expiresAt := time.Now().Add(time.Duration(profile.TTLSeconds) * time.Second).UTC()
-	lease, err := encryptLeaseForRecipient(remoteReq.ClientPublicKey, LeasePayload{
-		Env:       secrets.Env,
-		Files:     secrets.Files,
+
+	payload := LeasePayload{
 		Agent:     remoteReq.Agent,
 		Profile:   remoteReq.Profile,
 		Resource:  remoteReq.Resource,
 		Reason:    remoteReq.Reason,
 		Command:   remoteReq.Command,
 		ExpiresAt: expiresAt,
-	})
+	}
+
+	kind := remoteReq.Kind
+	if kind == "" {
+		kind = requestKindCommand
+	}
+
+	switch kind {
+	case requestKindVault:
+		// Authority-side execution: run bws/bw on this host, capture
+		// just the secret value, ship it inside the encrypted lease.
+		// The vault token never crosses the wire to the client.
+		value, err := resolveVaultRef(s.cfg, profile, remoteReq.Request(), nil)
+		if err != nil {
+			s.recordVaultFailure(remoteReq, err.Error())
+			s.localDeny(remoteReq.ID, "vault lookup failed: "+err.Error())
+			return
+		}
+		payload.SecretValue = value
+	case requestKindCommand:
+		secrets, err := resolveProfileSecrets(s.cfg, profile)
+		if err != nil {
+			s.localDeny(remoteReq.ID, "secret resolution failed: "+err.Error())
+			return
+		}
+		payload.Env = secrets.Env
+		payload.Files = secrets.Files
+	default:
+		s.localDeny(remoteReq.ID, "unsupported request kind: "+kind)
+		return
+	}
+
+	lease, err := encryptLeaseForRecipient(remoteReq.ClientPublicKey, payload)
 	if err != nil {
 		s.localDeny(remoteReq.ID, "lease encryption failed: "+err.Error())
 		return
@@ -93,6 +122,31 @@ func (s *capbrokerServer) localApproveRequest(remoteReq RemoteRequest, profile P
 		GrantID:     updated.ID,
 		Approved:    &approvedEvent,
 		Message:     message,
+	})
+	if kind == requestKindVault {
+		_ = appendAudit(s.stateDir, AuditEvent{
+			Event:       "vault_value_returned",
+			Agent:       updated.Agent,
+			Profile:     updated.Profile,
+			Resource:    updated.Resource,
+			Reason:      updated.Reason,
+			RequestHash: requestHash(updated.Request()),
+			GrantID:     updated.ID,
+			Message:     fmt.Sprintf("vault=%s ref=%s field=%s", profile.Vault, remoteReq.VaultRef, remoteReq.VaultField),
+		})
+	}
+}
+
+func (s *capbrokerServer) recordVaultFailure(remoteReq RemoteRequest, reason string) {
+	_ = appendAudit(s.stateDir, AuditEvent{
+		Event:       "vault_lookup_failed",
+		Agent:       remoteReq.Agent,
+		Profile:     remoteReq.Profile,
+		Resource:    remoteReq.Resource,
+		Reason:      remoteReq.Reason,
+		RequestHash: requestHash(remoteReq.Request()),
+		GrantID:     remoteReq.ID,
+		Message:     reason,
 	})
 }
 

@@ -80,15 +80,33 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	req := Request{
+		Kind:              create.Kind,
 		Agent:             create.Agent,
 		Profile:           create.Profile,
 		Resource:          create.Resource,
 		Reason:            create.Reason,
 		Command:           create.Command,
+		VaultRef:          create.VaultRef,
+		VaultField:        create.VaultField,
 		SessionTTLSeconds: create.SessionTTLSeconds,
 	}
-	if _, err := s.cfg.validateRequest(req, true); err != nil {
+	// `needsCommand` is only meaningful for the command kind. Vault
+	// requests have an empty command and validateRequest enforces that
+	// internally based on profile.Kind.
+	needsCommand := req.Kind == "" || req.Kind == requestKindCommand
+	if _, err := s.cfg.validateRequest(req, needsCommand); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	// Vault requests can ONLY be approved by the local-approve daemon
+	// path. The signed-approver flow (approvePendingOnce in
+	// remote_approve.go) builds command-style leases via
+	// resolveProfileSecrets and never populates SecretValue — a vault
+	// request approved that way would round-trip an empty value and
+	// look like success to the client. Reject upfront so misconfigured
+	// deployments fail loudly instead of returning empty secrets.
+	if req.Kind == requestKindVault && !s.localApprove {
+		writeError(w, http.StatusForbidden, "vault requests require a local-approve daemon (signed-approver flow does not support authority-side execution)")
 		return
 	}
 	if err := validateLeaseRecipientPublicKey(create.ClientPublicKey); err != nil {
@@ -98,11 +116,14 @@ func (s *capbrokerServer) createRequest(w http.ResponseWriter, r *http.Request) 
 	now := time.Now().UTC()
 	remoteReq := RemoteRequest{
 		ID:                "req_" + randomHex(16),
+		Kind:              create.Kind,
 		Agent:             create.Agent,
 		Profile:           create.Profile,
 		Resource:          create.Resource,
 		Reason:            create.Reason,
 		Command:           create.Command,
+		VaultRef:          create.VaultRef,
+		VaultField:        create.VaultField,
 		SessionTTLSeconds: create.SessionTTLSeconds,
 		ClientPublicKey:   create.ClientPublicKey,
 		Status:            remoteStatusPending,

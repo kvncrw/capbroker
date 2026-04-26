@@ -13,13 +13,25 @@ const (
 	remoteStatusDenied   = "denied"
 )
 
+// Request kinds. "command" is the original flow (broker injects env/files,
+// client exec's a command locally). "vault" runs a vault read on the
+// authority and returns just the secret value; the client never sees the
+// vault token.
+const (
+	requestKindCommand = "command"
+	requestKindVault   = "vault"
+)
+
 type RemoteRequest struct {
 	ID                string          `json:"id"`
+	Kind              string          `json:"kind,omitempty"`
 	Agent             string          `json:"agent"`
 	Profile           string          `json:"profile"`
 	Resource          string          `json:"resource"`
 	Reason            string          `json:"reason"`
 	Command           []string        `json:"command"`
+	VaultRef          string          `json:"vault_ref,omitempty"`
+	VaultField        string          `json:"vault_field,omitempty"`
 	SessionTTLSeconds int             `json:"session_ttl_seconds,omitempty"`
 	ClientPublicKey   string          `json:"client_public_key"`
 	Status            string          `json:"status"`
@@ -32,21 +44,27 @@ type RemoteRequest struct {
 
 func (r RemoteRequest) Request() Request {
 	return Request{
+		Kind:              r.Kind,
 		Agent:             r.Agent,
 		Profile:           r.Profile,
 		Resource:          r.Resource,
 		Reason:            r.Reason,
 		Command:           r.Command,
+		VaultRef:          r.VaultRef,
+		VaultField:        r.VaultField,
 		SessionTTLSeconds: r.SessionTTLSeconds,
 	}
 }
 
 type RemoteRequestCreate struct {
+	Kind              string   `json:"kind,omitempty"`
 	Agent             string   `json:"agent"`
 	Profile           string   `json:"profile"`
 	Resource          string   `json:"resource"`
 	Reason            string   `json:"reason"`
 	Command           []string `json:"command"`
+	VaultRef          string   `json:"vault_ref,omitempty"`
+	VaultField        string   `json:"vault_field,omitempty"`
 	SessionTTLSeconds int      `json:"session_ttl_seconds,omitempty"`
 	ClientPublicKey   string   `json:"client_public_key"`
 }
@@ -68,14 +86,15 @@ type EncryptedLease struct {
 }
 
 type LeasePayload struct {
-	Env       map[string]string `json:"env"`
-	Files     map[string]string `json:"files,omitempty"`
-	Agent     string            `json:"agent"`
-	Profile   string            `json:"profile"`
-	Resource  string            `json:"resource"`
-	Reason    string            `json:"reason"`
-	Command   []string          `json:"command"`
-	ExpiresAt time.Time         `json:"expires_at"`
+	Env         map[string]string `json:"env"`
+	Files       map[string]string `json:"files,omitempty"`
+	Agent       string            `json:"agent"`
+	Profile     string            `json:"profile"`
+	Resource    string            `json:"resource"`
+	Reason      string            `json:"reason"`
+	Command     []string          `json:"command"`
+	ExpiresAt   time.Time         `json:"expires_at"`
+	SecretValue string            `json:"secret_value,omitempty"` // vault-fetch only
 }
 
 func decisionSigningPayload(requestID string, decision RemoteDecision) []byte {

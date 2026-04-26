@@ -41,6 +41,36 @@ func TestRemoteLeaseEncryptDecrypt(t *testing.T) {
 	}
 }
 
+func TestRemoteLeaseEncryptDecryptVaultPayload(t *testing.T) {
+	t.Parallel()
+	privateKey, publicKey, err := generateLeaseRecipientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := time.Now().Add(time.Minute).UTC()
+	// Vault payload: only SecretValue is set; Env/Files empty.
+	encrypted, err := encryptLeaseForRecipient(publicKey, LeasePayload{
+		Agent:       "hermes",
+		Profile:     "bsm-fetch",
+		Resource:    "5da84bec-9b21-4e7f-a720-b41b00cad9d5",
+		ExpiresAt:   expiresAt,
+		SecretValue: "basilisk",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := decryptLease(privateKey, *encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.SecretValue != "basilisk" {
+		t.Fatalf("unexpected SecretValue %q", payload.SecretValue)
+	}
+	if len(payload.Env) != 0 || len(payload.Files) != 0 {
+		t.Fatal("vault payload should not carry Env or Files")
+	}
+}
+
 func TestDecisionSignatureVerification(t *testing.T) {
 	t.Parallel()
 	path := t.TempDir() + "/approver.key"
