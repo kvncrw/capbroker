@@ -405,28 +405,8 @@ func cmdDoctor(args []string) {
 	}
 }
 
-func cmdGrants(args []string) {
-	fs := flag.NewFlagSet("grants", flag.ExitOnError)
-	activeOnly := fs.Bool("active", true, "show active grants only")
-	_ = fs.Parse(args)
-	grants, err := loadGrants(defaultStateDir())
-	die(err)
-	if *activeOnly {
-		grants = pruneExpired(grants, time.Now())
-	}
-	printJSON(grants)
-}
-
-func cmdRevoke(args []string) {
-	fs := flag.NewFlagSet("revoke", flag.ExitOnError)
-	id := fs.String("id", "", "grant id")
-	all := fs.Bool("all", false, "revoke all grants")
-	_ = fs.Parse(args)
-	if !*all && *id == "" {
-		die(fmt.Errorf("revoke requires --id or --all"))
-	}
-	die(revokeGrants(defaultStateDir(), *id, *all))
-}
+// cmdGrants and cmdRevoke now live in cmd_grants.go — they handle all
+// three grant sources (operator-session, permanent, temporal).
 
 func mustLoadConfig(path string) *Config {
 	cfg, err := loadConfig(path)
@@ -465,8 +445,9 @@ Commands:
   capbroker vault-fetch --server URL --agent AGENT --profile PROFILE --ref REF [--field FIELD] [--reason TEXT]
   capbroker request-upgrade --server URL --agent AGENT --target-profile PROFILE --target-resource VALUE --reason TEXT --grant-mode once|session|permanent
   capbroker review-upgrades --server URL [--watch] [--operator IDENT]
-  capbroker grants [--active=true]
-  capbroker revoke --id GRANT_ID | --all
+  capbroker grants [--all] [--json] [--kind operator-session|permanent|temporal]
+  capbroker revoke --id GRANT_ID [--state-dir PATH] [--operator IDENT]
+  capbroker revoke --all [--kind operator-session|permanent|temporal]
   capbroker auto-approve enable [--ttl 30m] [--idle-window 5m] [--reason TEXT]
   capbroker auto-approve disable
   capbroker auto-approve status`)
