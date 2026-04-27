@@ -47,27 +47,27 @@ func operatorIdent(r *http.Request) string {
 // authorizeUpgradeOperator gates the upgrade decision path on the daemon
 // side. Two layers, both opt-in via cfg.Remote:
 //
-//   1. Source-IP allowlist (cfg.Remote.UpgradeAllowedSources, CIDRs):
-//      The trusted-identity headers below (Cf-Access-Authenticated-User-Email,
-//      X-Forwarded-User) are NOT cryptographically bound to the actual
-//      authenticated session — they're just headers that the proxy in
-//      front of the daemon (Cloudflare Access, an internal nginx, etc.)
-//      injects after authenticating. Any caller that can reach the daemon
-//      directly (bypassing the proxy) can forge them.
+//  1. Source-IP allowlist (cfg.Remote.UpgradeAllowedSources, CIDRs):
+//     The trusted-identity headers below (Cf-Access-Authenticated-User-Email,
+//     X-Forwarded-User) are NOT cryptographically bound to the actual
+//     authenticated session — they're just headers that the proxy in
+//     front of the daemon (Cloudflare Access, an internal nginx, etc.)
+//     injects after authenticating. Any caller that can reach the daemon
+//     directly (bypassing the proxy) can forge them.
 //
-//      The allowlist constrains which RemoteAddrs are permitted to send
-//      decisions, so a compromised tailnet host can't send a forged
-//      "Cf-Access-...: kcrawley@web" POST and self-approve. Set this to
-//      the CIDR(s) of your CF Tunnel pop / VPN exit / loopback as
-//      appropriate. When empty, source IP is not checked (back-compat for
-//      laptop-local single-user deployments where the daemon listens on
-//      127.0.0.1 only).
+//     The allowlist constrains which RemoteAddrs are permitted to send
+//     decisions, so a compromised tailnet host can't send a forged
+//     "Cf-Access-...: kcrawley@web" POST and self-approve. Set this to
+//     the CIDR(s) of your CF Tunnel pop / VPN exit / loopback as
+//     appropriate. When empty, source IP is not checked (back-compat for
+//     laptop-local single-user deployments where the daemon listens on
+//     127.0.0.1 only).
 //
-//   2. Identity allowlist (cfg.Remote.UpgradeApprovers, emails):
-//      The header-supplied operator identity must be in the list,
-//      case-insensitive. If the list is empty AND AllowAnonymousUpgrade
-//      is false, ALL decisions are rejected (fail-closed default for a
-//      freshly-installed daemon — operator must opt in).
+//  2. Identity allowlist (cfg.Remote.UpgradeApprovers, emails):
+//     The header-supplied operator identity must be in the list,
+//     case-insensitive. If the list is empty AND AllowAnonymousUpgrade
+//     is false, ALL decisions are rejected (fail-closed default for a
+//     freshly-installed daemon — operator must opt in).
 //
 // Codex's earlier review correctly noted that #1 is the structural fix
 // to the spoofable-header concern; #2 alone gives only superficial
