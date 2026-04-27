@@ -49,9 +49,9 @@ type Profile struct {
 	Env               map[string]string `json:"env"`
 	Files             map[string]string `json:"files,omitempty"`
 	// Vault profile fields. Only consulted when Kind == "vault".
-	Vault       string   `json:"vault,omitempty"`        // "bsm" | "bw"
-	VaultAuth   string   `json:"vault_auth,omitempty"`   // SecretSource ID resolving the daemon's vault credential
-	VaultFields []string `json:"vault_fields,omitempty"` // bw only: fields the agent may request
+	Vault       string            `json:"vault,omitempty"`        // "bsm" | "bw"
+	VaultAuth   string            `json:"vault_auth,omitempty"`   // SecretSource ID resolving the daemon's vault credential
+	VaultFields []string          `json:"vault_fields,omitempty"` // bw only: fields the agent may request
 	Metadata    map[string]string `json:"metadata"`
 }
 
@@ -75,6 +75,34 @@ type SecretProvider struct {
 
 type RemoteConfig struct {
 	Approvers map[string]string `json:"approvers,omitempty"`
+	// UpgradeApprovers is the allowlist of operator identities (typically
+	// email addresses from Cf-Access-Authenticated-User-Email) authorized
+	// to decide permission-upgrade requests via the HTTP review surface
+	// or the review-upgrades CLI. Fail-closed: if empty AND
+	// AllowAnonymousUpgrade is false, all decision attempts are rejected.
+	// This is defense-in-depth — the daemon assumes Cloudflare Access (or
+	// equivalent) is in front, but enforces the allowlist itself in case
+	// CF Access is bypassed (direct tailnet hit, misconfigured ingress,
+	// etc.). Without this gate, anyone reachable to the daemon who knew a
+	// pending request id could POST /v1/upgrades/{id}/decide and self-grant
+	// permanent allowlist entries.
+	UpgradeApprovers []string `json:"upgrade_approvers,omitempty"`
+	// UpgradeAllowedSources is a CIDR (or bare-IP) allowlist for the
+	// SOURCE addresses permitted to POST upgrade decisions. The
+	// trusted-identity headers (Cf-Access-...-Email, X-Forwarded-User)
+	// can be forged by anyone who can reach the daemon directly, so
+	// production daemons exposed beyond loopback should pin this to the
+	// CIDR(s) of the proxy/tunnel that injects those headers (e.g. the
+	// cloudflared tunnel egress, an internal nginx, a VPN exit). When
+	// empty the source check is skipped — fine for laptop-local
+	// deployments where the daemon binds to 127.0.0.1 only.
+	UpgradeAllowedSources []string `json:"upgrade_allowed_sources,omitempty"`
+	// AllowAnonymousUpgrade is the escape hatch: when true, the upgrade
+	// decide path accepts decisions with no trusted-header identity and
+	// audits them as "anonymous-http". Intended for local dev/test only;
+	// production daemons should leave this false and populate
+	// UpgradeApprovers.
+	AllowAnonymousUpgrade bool `json:"allow_anonymous_upgrade,omitempty"`
 }
 
 func loadConfig(path string) (*Config, error) {
