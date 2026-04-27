@@ -1,5 +1,9 @@
-#!/usr/bin/env sh
-set -eu
+#!/usr/bin/env bash
+# bash (not sh) because the 403-breadcrumb path uses process substitution
+# (`2> >(tee ...)`) to capture stderr while still letting the user see it.
+# That syntax is bash-only — under dash/ash this script would fail to
+# parse before reaching the kubectl call.
+set -euo pipefail
 
 server_file="${CAPBROKER_SERVER_FILE:-/opt/data/capbroker-server}"
 if [ -z "${CAPBROKER_SERVER:-}" ] && [ -f "$server_file" ]; then
