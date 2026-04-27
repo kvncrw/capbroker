@@ -60,44 +60,41 @@ set -e
 
 # On a 403-style denial, drop a structured breadcrumb the agent's next
 # wake handler can pick up to surface "you have outstanding capability
-# gaps". Cheap to skip if disabled (CAPBROKER_DENIED_LOG=/dev/null) or
-# if the directory doesn't exist (we don't auto-create — agents in
-# transient pods shouldn't accumulate state).
+# gaps". Best-effort throughout: a missing python3, missing log dir,
+# unwritable log file, or any encoding hiccup must NEVER change the
+# exit code the caller sees — kubectl's denial is the meaningful
+# signal, the breadcrumb is the convenience.
 #
 # JSON encoding is delegated to python3 (json.dumps) so backslashes,
 # control characters, and embedded quotes in kubectl args (think
 # JSONPath like `-o jsonpath='{.spec.containers[0].image}'`) don't
-# corrupt the breadcrumb. argv comes in via env to avoid a separate
-# escape pass on the bash side; stderr message goes the same way.
+# corrupt the breadcrumb. argv arrives NUL-delimited on stdin so any
+# shell-special bytes survive intact.
 if [ "$status" -ne 0 ] && grep -q 'is not allowed for profile' "$stderr_capture"; then
   log_dir="$(dirname "$denied_log")"
-  if [ -d "$log_dir" ]; then
-    msg="$(grep 'is not allowed for profile' "$stderr_capture" | head -1)"
-    line=$(
-      CAPBROKER_DENIED_AGENT="${CAPBROKER_AGENT:-remote-agent}" \
-      CAPBROKER_DENIED_PROFILE="$target_profile" \
-      CAPBROKER_DENIED_RESOURCE="$target_resource" \
-      CAPBROKER_DENIED_STDERR="$msg" \
-      CAPBROKER_DENIED_ARGV_JSON="$(printf '%s\0' "$@" | python3 -c '
+  if [ -d "$log_dir" ] && command -v python3 >/dev/null 2>&1; then
+    msg="$(grep 'is not allowed for profile' "$stderr_capture" | head -1 || true)"
+    {
+      printf '%s\0' "$@" | \
+        CAPBROKER_DENIED_AGENT="${CAPBROKER_AGENT:-remote-agent}" \
+        CAPBROKER_DENIED_PROFILE="$target_profile" \
+        CAPBROKER_DENIED_RESOURCE="$target_resource" \
+        CAPBROKER_DENIED_STDERR="$msg" \
+        python3 -c '
 import json, os, sys
+from datetime import datetime, timezone
 items = sys.stdin.buffer.read().split(b"\0")
 items = [b.decode("utf-8", "replace") for b in items if b]
-print(json.dumps(["kubectl", *items]))
-')" \
-      python3 -c '
-import json, os
-from datetime import datetime, timezone
 print(json.dumps({
     "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "agent": os.environ["CAPBROKER_DENIED_AGENT"],
     "target_profile": os.environ["CAPBROKER_DENIED_PROFILE"],
     "target_resource": os.environ["CAPBROKER_DENIED_RESOURCE"],
-    "argv": json.loads(os.environ["CAPBROKER_DENIED_ARGV_JSON"]),
+    "argv": ["kubectl", *items],
     "stderr": os.environ["CAPBROKER_DENIED_STDERR"],
 }))
-'
-    )
-    printf '%s\n' "$line" >> "$denied_log" 2>/dev/null || true
+' >> "$denied_log"
+    } 2>/dev/null || true
   fi
 fi
 
