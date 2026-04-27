@@ -94,12 +94,26 @@ func runRequestUpgrade(server string, req Request, waitTimeout, pollInterval tim
 		}
 		switch current.Status {
 		case remoteStatusApproved:
-			marker := "granted"
-			if current.EncryptedLease != nil {
-				if payload, err := decryptLease(privateKey, *current.EncryptedLease); err == nil && payload.UpgradeGranted != "" {
-					marker = "granted: " + payload.UpgradeGranted
-				}
+			// Fail closed if the handshake lease isn't there or doesn't
+			// decrypt — same posture as remote-run/vault-fetch. An
+			// approved-without-lease state could be a tampered store, a
+			// crash mid-write, or a server bug; treating it as "go ahead"
+			// would have the agent retry against an allowlist that may
+			// not actually have the grant, producing a confusing 403 loop.
+			if current.EncryptedLease == nil {
+				fmt.Fprintln(os.Stderr, "capbroker: approved upgrade has no encrypted lease — refusing to claim grant")
+				return 1
 			}
+			payload, err := decryptLease(privateKey, *current.EncryptedLease)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capbroker: upgrade lease decrypt failed: %v\n", err)
+				return 1
+			}
+			if payload.UpgradeGranted == "" {
+				fmt.Fprintln(os.Stderr, "capbroker: upgrade lease missing UpgradeGranted marker — refusing to claim grant")
+				return 1
+			}
+			marker := "granted: " + payload.UpgradeGranted
 			fmt.Fprintf(os.Stderr, "capbroker: upgrade %s — retry the original command\n", marker)
 			fmt.Println(marker)
 			return 0

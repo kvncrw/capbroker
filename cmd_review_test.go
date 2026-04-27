@@ -19,6 +19,11 @@ func reviewE2EServer(t *testing.T) (*httptest.Server, *capbrokerServer) {
 	t.Helper()
 	server, _ := upgradeTestServer(t)
 	server.localApprove = true // /v1/requests upgrade path requires it
+	// PR #12 added a fail-closed auth gate: if UpgradeApprovers is empty
+	// AND AllowAnonymousUpgrade is false, all decisions return 403.
+	// The CLI tests below send the operator email "kcrawley@cli" via
+	// the trusted header; allowlist it so the decide path runs.
+	server.cfg.Remote.UpgradeApprovers = []string{"kcrawley@cli"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/requests", server.handleRequests)
 	mux.HandleFunc("/v1/requests/", server.handleRequestByID)
