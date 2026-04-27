@@ -516,6 +516,107 @@ func TestUpgradeAPIEmptyAllowlistSkipsSourceCheck(t *testing.T) {
 	}
 }
 
+// --- Content-Type guard on JSON API ---
+//
+// Codex P1 round 4 noted that the JSON decide endpoint accepted any
+// content type, so a cross-origin "simple POST" (text/plain with a
+// JSON-shaped body) could ride the operator's session without a CORS
+// preflight. Forcing application/json triggers preflight and the
+// daemon's lack of permissive CORS headers blocks the browser.
+
+func TestUpgradeAPIRejectsNonJSONContentType(t *testing.T) {
+	t.Parallel()
+	ts, server, req := httpUpgradeServerWithAuthMode(t, []string{"kcrawley@web"}, false)
+	body := strings.NewReader(`{"mode":"permanent"}`)
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/upgrades/"+req.ID+"/decide", body)
+	httpReq.Header.Set("Content-Type", "text/plain")
+	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415 for text/plain, got %d", resp.StatusCode)
+	}
+	got, _, _ := server.store.get(req.ID)
+	if got.Status != remoteStatusPending {
+		t.Fatalf("rejected request should leave status pending, got %s", got.Status)
+	}
+}
+
+func TestUpgradeAPIAcceptsJSONWithCharsetParam(t *testing.T) {
+	t.Parallel()
+	// Real browsers and HTTP clients often send "application/json; charset=utf-8".
+	// The check should normalize the type token and accept that form.
+	ts, server, req := httpUpgradeServerWithAuthMode(t, []string{"kcrawley@web"}, false)
+	body := strings.NewReader(`{"mode":"once"}`)
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/upgrades/"+req.ID+"/decide", body)
+	httpReq.Header.Set("Content-Type", "application/json; charset=utf-8")
+	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with charset param, got %d", resp.StatusCode)
+	}
+	got, _, _ := server.store.get(req.ID)
+	if got.Status != remoteStatusApproved {
+		t.Fatalf("status %s", got.Status)
+	}
+}
+
+// --- Default loopback-only source check ---
+//
+// When UpgradeAllowedSources is empty AND AllowAnonymousUpgrade is
+// false, only loopback sources are honored. This makes the
+// trusted-identity-header model safe by default — a remote attacker
+// can forge headers but the request is rejected before they're read.
+
+func TestCheckUpgradeSourceAllowedDefaultLoopback(t *testing.T) {
+	t.Parallel()
+	server, _ := upgradeTestServer(t)
+	// Default config: no allowlist.
+	cases := []struct {
+		remote string
+		ok     bool
+	}{
+		{"127.0.0.1:54321", true},
+		{"[::1]:54321", true},
+		{"10.0.0.5:54321", false},
+		{"192.168.1.10:54321", false},
+		{"203.0.113.7:54321", false},
+	}
+	for _, c := range cases {
+		req, _ := http.NewRequest("POST", "http://x/", nil)
+		req.RemoteAddr = c.remote
+		err := server.checkUpgradeSourceAllowed(req)
+		gotOK := err == nil
+		if gotOK != c.ok {
+			t.Errorf("remote=%s: ok=%v want=%v err=%v", c.remote, gotOK, c.ok, err)
+		}
+	}
+}
+
+func TestCheckUpgradeSourceAllowedExplicitListNarrowsLoopback(t *testing.T) {
+	t.Parallel()
+	server, _ := upgradeTestServer(t)
+	// When the operator sets an explicit list, loopback is no longer
+	// auto-allowed — the operator's list is authoritative.
+	server.cfg.Remote.UpgradeAllowedSources = []string{"10.0.0.0/24"}
+	req, _ := http.NewRequest("POST", "http://x/", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	if err := server.checkUpgradeSourceAllowed(req); err == nil {
+		t.Fatal("loopback should NOT be implicitly allowed when an explicit allowlist is set")
+	}
+	req.RemoteAddr = "10.0.0.5:54321"
+	if err := server.checkUpgradeSourceAllowed(req); err != nil {
+		t.Fatalf("10.0.0.5 should be in 10.0.0.0/24: %v", err)
+	}
+}
+
 // --- CSRF tests ---
 //
 // Codex P1 (round 3 on PR #12) called out that a malicious page could

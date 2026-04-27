@@ -79,14 +79,17 @@ func operatorIdent(r *http.Request) string {
 // Returns the validated operator identity (to record in audit + grant)
 // or an error suitable for 403.
 func (s *capbrokerServer) authorizeUpgradeOperator(r *http.Request) (string, error) {
+	op := operatorIdent(r)
+	// AllowAnonymousUpgrade is the explicit dev/test escape hatch — skips
+	// both source AND identity checks. Production deployments must leave
+	// it false.
+	if s.cfg.Remote.AllowAnonymousUpgrade && len(s.cfg.Remote.UpgradeApprovers) == 0 {
+		return op, nil
+	}
 	if err := s.checkUpgradeSourceAllowed(r); err != nil {
 		return "", err
 	}
-	op := operatorIdent(r)
 	if len(s.cfg.Remote.UpgradeApprovers) == 0 {
-		if s.cfg.Remote.AllowAnonymousUpgrade {
-			return op, nil
-		}
 		return "", fmt.Errorf("upgrade decisions are disabled: configure remote.upgrade_approvers (or set remote.allow_anonymous_upgrade for dev)")
 	}
 	if op == "anonymous-http" {
@@ -101,15 +104,23 @@ func (s *capbrokerServer) authorizeUpgradeOperator(r *http.Request) (string, err
 	return "", fmt.Errorf("operator %q is not in remote.upgrade_approvers", op)
 }
 
-// checkUpgradeSourceAllowed returns nil if the request's RemoteAddr is in
-// any of cfg.Remote.UpgradeAllowedSources CIDRs, or if the list is empty
-// (back-compat with laptop-local deployments). Errors are formatted for
-// 403 + audit.
+// checkUpgradeSourceAllowed returns nil if the request's RemoteAddr is
+// in any of cfg.Remote.UpgradeAllowedSources CIDRs. When that list is
+// empty, the default policy is LOOPBACK-ONLY: only requests from
+// 127.0.0.0/8 or ::1 are honored. This makes the trusted-identity
+// headers safe by default — a remote attacker can forge headers all
+// they like, but if they're not on loopback, the decision is rejected
+// before any header is read.
+//
+// Operators who run the daemon behind a tunnel/proxy and want to honor
+// requests from non-loopback sources (the public-mobile review-form
+// case) opt in by populating UpgradeAllowedSources with the
+// tunnel/proxy egress CIDR.
+//
+// Anonymous mode (cfg.Remote.AllowAnonymousUpgrade=true) bypasses this
+// check — that mode is the explicit "I know what I'm doing, this is
+// dev/test" escape hatch and isn't reached in production deployments.
 func (s *capbrokerServer) checkUpgradeSourceAllowed(r *http.Request) error {
-	cidrs := s.cfg.Remote.UpgradeAllowedSources
-	if len(cidrs) == 0 {
-		return nil
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		// httptest sometimes hands us bare IPs; try the raw value.
@@ -118,6 +129,13 @@ func (s *capbrokerServer) checkUpgradeSourceAllowed(r *http.Request) error {
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return fmt.Errorf("upgrade decisions require a parseable source IP, got %q", r.RemoteAddr)
+	}
+	cidrs := s.cfg.Remote.UpgradeAllowedSources
+	if len(cidrs) == 0 {
+		if ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("source IP %s is not loopback; configure remote.upgrade_allowed_sources to allow non-loopback sources", ip)
 	}
 	for _, cidr := range cidrs {
 		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
@@ -232,6 +250,17 @@ func (s *capbrokerServer) handleUpgradeAPI(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	id := parts[0]
+	// Reject non-JSON content types BEFORE decoding. Without this, a
+	// cross-origin "simple POST" (text/plain with a JSON-shaped body)
+	// would not trigger a CORS preflight and could ride the operator's
+	// session to apply a decision. Requiring application/json forces a
+	// preflight on cross-origin browser POSTs — the daemon doesn't
+	// answer with permissive CORS headers, so the browser blocks.
+	ct := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+	if ct != "application/json" {
+		writeError(w, http.StatusUnsupportedMediaType, "Content-Type: application/json required")
+		return
+	}
 	var body struct {
 		Mode    string `json:"mode"`
 		Message string `json:"message,omitempty"`
