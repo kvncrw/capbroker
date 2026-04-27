@@ -411,6 +411,105 @@ func TestUpgradeUIFormPostRejectsUnauthorizedOperator(t *testing.T) {
 	}
 }
 
+// --- Source-IP allowlist tests ---
+//
+// Codex's earlier review correctly noted that the trusted-identity
+// headers can be forged by anything that reaches the daemon directly.
+// UpgradeAllowedSources is the structural fix: even with a perfectly
+// crafted forged header, a request from outside the CIDR list is
+// dropped before the email-allowlist check ever runs.
+
+func TestUpgradeAPIRejectsSourceOutsideAllowlist(t *testing.T) {
+	t.Parallel()
+	ts, server, req := httpUpgradeServerWithAuthMode(t, []string{"kcrawley@web"}, false)
+	// Restrict to a network that httptest's loopback dialer will NEVER
+	// fall under. httptest.NewServer binds to 127.0.0.1 so we pick a
+	// disjoint RFC1918 block.
+	server.cfg.Remote.UpgradeAllowedSources = []string{"10.255.255.0/24"}
+
+	body := strings.NewReader(`{"mode":"permanent"}`)
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/upgrades/"+req.ID+"/decide", body)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for off-net source, got %d", resp.StatusCode)
+	}
+	got, _, _ := server.store.get(req.ID)
+	if got.Status != remoteStatusPending {
+		t.Fatalf("rejected decision should leave status pending, got %s", got.Status)
+	}
+}
+
+func TestUpgradeAPIAcceptsSourceInsideAllowlist(t *testing.T) {
+	t.Parallel()
+	ts, server, req := httpUpgradeServerWithAuthMode(t, []string{"kcrawley@web"}, false)
+	// httptest binds to 127.0.0.1 — match it via a /8 to be robust to the
+	// dialer picking a different loopback alias.
+	server.cfg.Remote.UpgradeAllowedSources = []string{"127.0.0.0/8"}
+
+	body := strings.NewReader(`{"mode":"once"}`)
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/upgrades/"+req.ID+"/decide", body)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for on-net source, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpgradeAPIBareIPInAllowlist(t *testing.T) {
+	t.Parallel()
+	// Operator ergonomic: bare IPs without /32 should also work.
+	ts, server, req := httpUpgradeServerWithAuthMode(t, []string{"kcrawley@web"}, false)
+	server.cfg.Remote.UpgradeAllowedSources = []string{"127.0.0.1"}
+
+	body := strings.NewReader(`{"mode":"once"}`)
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/upgrades/"+req.ID+"/decide", body)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpgradeAPIEmptyAllowlistSkipsSourceCheck(t *testing.T) {
+	t.Parallel()
+	// Default behavior: when UpgradeAllowedSources is empty, source IP
+	// is not checked. Back-compat with laptop-local single-user
+	// deployments that bind to 127.0.0.1 only.
+	ts, server, req := httpUpgradeServerWithAuthMode(t, []string{"kcrawley@web"}, false)
+	if len(server.cfg.Remote.UpgradeAllowedSources) != 0 {
+		t.Fatal("default fixture must leave UpgradeAllowedSources empty")
+	}
+
+	body := strings.NewReader(`{"mode":"once"}`)
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/upgrades/"+req.ID+"/decide", body)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with empty allowlist, got %d", resp.StatusCode)
+	}
+}
+
 func readBody(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	buf := make([]byte, 0, 4096)

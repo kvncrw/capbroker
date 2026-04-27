@@ -87,6 +87,16 @@ type RemoteConfig struct {
 	// pending request id could POST /v1/upgrades/{id}/decide and self-grant
 	// permanent allowlist entries.
 	UpgradeApprovers []string `json:"upgrade_approvers,omitempty"`
+	// UpgradeAllowedSources is a CIDR (or bare-IP) allowlist for the
+	// SOURCE addresses permitted to POST upgrade decisions. The
+	// trusted-identity headers (Cf-Access-...-Email, X-Forwarded-User)
+	// can be forged by anyone who can reach the daemon directly, so
+	// production daemons exposed beyond loopback should pin this to the
+	// CIDR(s) of the proxy/tunnel that injects those headers (e.g. the
+	// cloudflared tunnel egress, an internal nginx, a VPN exit). When
+	// empty the source check is skipped — fine for laptop-local
+	// deployments where the daemon binds to 127.0.0.1 only.
+	UpgradeAllowedSources []string `json:"upgrade_allowed_sources,omitempty"`
 	// AllowAnonymousUpgrade is the escape hatch: when true, the upgrade
 	// decide path accepts decisions with no trusted-header identity and
 	// audits them as "anonymous-http". Intended for local dev/test only;

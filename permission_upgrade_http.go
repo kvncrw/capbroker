@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -44,28 +45,43 @@ func operatorIdent(r *http.Request) string {
 }
 
 // authorizeUpgradeOperator gates the upgrade decision path on the daemon
-// side. Codex review on PR #12 caught that handleUpgradeAPI applied
-// decisions immediately from request body+headers with no daemon-side
-// auth check — Cloudflare Access in front was the only gate. If anything
-// bypassed CF Access (direct tailnet hit, misconfigured ingress), an
-// attacker who knew a pending upgrade id could POST {"mode":"permanent"}
-// and write permanent allowlist grants.
+// side. Two layers, both opt-in via cfg.Remote:
 //
-// Fail-closed model:
-//   - If cfg.Remote.UpgradeApprovers is non-empty, the operator from the
-//     trusted header MUST be in the list (case-insensitive). Otherwise
-//     reject with 403 + audit.
-//   - If cfg.Remote.UpgradeApprovers is empty AND AllowAnonymousUpgrade is
-//     true, accept anyone (dev/test mode). The audit still records the
-//     header-supplied identity, which is "anonymous-http" if absent.
-//   - If cfg.Remote.UpgradeApprovers is empty AND AllowAnonymousUpgrade is
-//     false, reject ALL decisions. This is the safe production default
-//     for a freshly-installed daemon — operator must opt in by
-//     populating the list.
+//   1. Source-IP allowlist (cfg.Remote.UpgradeAllowedSources, CIDRs):
+//      The trusted-identity headers below (Cf-Access-Authenticated-User-Email,
+//      X-Forwarded-User) are NOT cryptographically bound to the actual
+//      authenticated session — they're just headers that the proxy in
+//      front of the daemon (Cloudflare Access, an internal nginx, etc.)
+//      injects after authenticating. Any caller that can reach the daemon
+//      directly (bypassing the proxy) can forge them.
+//
+//      The allowlist constrains which RemoteAddrs are permitted to send
+//      decisions, so a compromised tailnet host can't send a forged
+//      "Cf-Access-...: kcrawley@web" POST and self-approve. Set this to
+//      the CIDR(s) of your CF Tunnel pop / VPN exit / loopback as
+//      appropriate. When empty, source IP is not checked (back-compat for
+//      laptop-local single-user deployments where the daemon listens on
+//      127.0.0.1 only).
+//
+//   2. Identity allowlist (cfg.Remote.UpgradeApprovers, emails):
+//      The header-supplied operator identity must be in the list,
+//      case-insensitive. If the list is empty AND AllowAnonymousUpgrade
+//      is false, ALL decisions are rejected (fail-closed default for a
+//      freshly-installed daemon — operator must opt in).
+//
+// Codex's earlier review correctly noted that #1 is the structural fix
+// to the spoofable-header concern; #2 alone gives only superficial
+// defense against an attacker who can already reach the daemon. Future
+// work: full Cf-Access-Jwt-Assertion verification (JWT signed by CF's
+// JWKS) would close the remaining gap, but adds a ~1k-line dep for a
+// niche threat model and is intentionally deferred.
 //
 // Returns the validated operator identity (to record in audit + grant)
 // or an error suitable for 403.
 func (s *capbrokerServer) authorizeUpgradeOperator(r *http.Request) (string, error) {
+	if err := s.checkUpgradeSourceAllowed(r); err != nil {
+		return "", err
+	}
 	op := operatorIdent(r)
 	if len(s.cfg.Remote.UpgradeApprovers) == 0 {
 		if s.cfg.Remote.AllowAnonymousUpgrade {
@@ -83,6 +99,40 @@ func (s *capbrokerServer) authorizeUpgradeOperator(r *http.Request) (string, err
 		}
 	}
 	return "", fmt.Errorf("operator %q is not in remote.upgrade_approvers", op)
+}
+
+// checkUpgradeSourceAllowed returns nil if the request's RemoteAddr is in
+// any of cfg.Remote.UpgradeAllowedSources CIDRs, or if the list is empty
+// (back-compat with laptop-local deployments). Errors are formatted for
+// 403 + audit.
+func (s *capbrokerServer) checkUpgradeSourceAllowed(r *http.Request) error {
+	cidrs := s.cfg.Remote.UpgradeAllowedSources
+	if len(cidrs) == 0 {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// httptest sometimes hands us bare IPs; try the raw value.
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("upgrade decisions require a parseable source IP, got %q", r.RemoteAddr)
+	}
+	for _, cidr := range cidrs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err != nil {
+			// Allow bare-IP entries (e.g. "127.0.0.1") for ergonomics.
+			if parsed := net.ParseIP(strings.TrimSpace(cidr)); parsed != nil && parsed.Equal(ip) {
+				return nil
+			}
+			continue
+		}
+		if network.Contains(ip) {
+			return nil
+		}
+	}
+	return fmt.Errorf("source IP %s is not in remote.upgrade_allowed_sources", ip)
 }
 
 // recordUnauthorizedUpgrade audits a rejected decision attempt so the
@@ -323,7 +373,7 @@ var upgradeListTemplate = template.Must(template.New("list").Parse(`<!doctype ht
 {{range .}}
 <div class="req">
   <h2>{{.Agent}} → {{.TargetProfile}} += <code>{{.TargetResource}}</code></h2>
-  <div class="meta">id <code>{{.ID}}</code> • requested {{.GrantMode}} • created {{.CreatedAt.Format "2026-01-02 15:04 MST"}}</div>
+  <div class="meta">id <code>{{.ID}}</code> • requested {{.GrantMode}} • created {{.CreatedAt.Format "2006-01-02 15:04 MST"}}</div>
   <div class="reason">"{{.Reason}}"</div>
   <p><a class="btn" href="/u/{{.ID}}">decide →</a> <a class="btn" href="/u/{{.ID}}/diff">diff</a></p>
 </div>
@@ -359,7 +409,7 @@ var upgradeFormTemplate = template.Must(template.New("form").Parse(`<!doctype ht
 <div class="meta">
   request <code>{{.R.ID}}</code> •
   agent requested <strong>{{.R.GrantMode}}</strong> •
-  created {{.R.CreatedAt.Format "2026-01-02 15:04 MST"}}
+  created {{.R.CreatedAt.Format "2006-01-02 15:04 MST"}}
   {{if .R.OriginalRequestID}}• original: <code>{{.R.OriginalRequestID}}</code>{{end}}
 </div>
 <div class="reason">"{{.R.Reason}}"</div>
