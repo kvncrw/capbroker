@@ -1,4 +1,7 @@
 #!/usr/bin/env sh
+# POSIX sh — works under dash/ash on minimal container images. The
+# 403-breadcrumb path captures stderr to a temp file and replays it
+# rather than using bash process substitution.
 set -eu
 
 server_file="${CAPBROKER_SERVER_FILE:-/opt/data/capbroker-server}"
@@ -35,11 +38,68 @@ ttl_args=""
 if [ -n "${CAPBROKER_SESSION_TTL:-}" ]; then
   ttl_args="--session-ttl ${CAPBROKER_SESSION_TTL}"
 fi
+denied_log="${CAPBROKER_DENIED_LOG:-/opt/data/capbroker-denied.jsonl}"
+target_profile="${CAPBROKER_PROFILE:-k8s-read}"
+target_resource="namespace/$namespace"
+
+# Capture stderr to a temp file so the 403-breadcrumb path can match
+# against it AFTER capbroker exits. We replay the full stderr to the
+# real fd 2 unconditionally so the user still sees the denial message
+# (just at exit instead of streaming). For a non-interactive wrapper
+# around kubectl this is fine — the wait is bounded.
+stderr_capture="$(mktemp)"
+trap 'rm -f "$stderr_capture"' EXIT INT TERM
+
+set +e
 # shellcheck disable=SC2086
-exec capbroker remote-run \
+capbroker remote-run \
   --agent "${CAPBROKER_AGENT:-remote-agent}" \
-  --profile "${CAPBROKER_PROFILE:-k8s-read}" \
-  --resource "namespace/$namespace" \
+  --profile "$target_profile" \
+  --resource "$target_resource" \
   --reason "$reason" \
   $ttl_args \
-  -- kubectl "$@"
+  -- kubectl "$@" 2>"$stderr_capture"
+status=$?
+set -e
+cat "$stderr_capture" >&2 2>/dev/null || true
+
+# On a 403-style denial, drop a structured breadcrumb the agent's next
+# wake handler can pick up to surface "you have outstanding capability
+# gaps". Best-effort throughout: missing python3, missing log dir,
+# unwritable log file, or any encoding hiccup must NEVER change the
+# exit code the caller sees.
+#
+# JSON encoding is delegated to python3 (json.dumps) so backslashes,
+# control characters, and embedded quotes in kubectl args (think
+# JSONPath like `-o jsonpath='{.spec.containers[0].image}'`) don't
+# corrupt the breadcrumb. argv arrives NUL-delimited on stdin so any
+# shell-special bytes survive intact.
+if [ "$status" -ne 0 ] && grep -q 'is not allowed for profile' "$stderr_capture"; then
+  log_dir="$(dirname "$denied_log")"
+  if [ -d "$log_dir" ] && command -v python3 >/dev/null 2>&1; then
+    msg="$(grep 'is not allowed for profile' "$stderr_capture" | head -1 || true)"
+    {
+      printf '%s\0' "$@" | \
+        CAPBROKER_DENIED_AGENT="${CAPBROKER_AGENT:-remote-agent}" \
+        CAPBROKER_DENIED_PROFILE="$target_profile" \
+        CAPBROKER_DENIED_RESOURCE="$target_resource" \
+        CAPBROKER_DENIED_STDERR="$msg" \
+        python3 -c '
+import json, os, sys
+from datetime import datetime, timezone
+items = sys.stdin.buffer.read().split(b"\0")
+items = [b.decode("utf-8", "replace") for b in items if b]
+print(json.dumps({
+    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "agent": os.environ["CAPBROKER_DENIED_AGENT"],
+    "target_profile": os.environ["CAPBROKER_DENIED_PROFILE"],
+    "target_resource": os.environ["CAPBROKER_DENIED_RESOURCE"],
+    "argv": ["kubectl", *items],
+    "stderr": os.environ["CAPBROKER_DENIED_STDERR"],
+}))
+' >> "$denied_log"
+    } 2>/dev/null || true
+  fi
+fi
+
+exit "$status"

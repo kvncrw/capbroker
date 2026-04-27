@@ -28,6 +28,31 @@ func postJSON(url string, request, response interface{}) error {
 	return decodeRemoteResponse(resp, response)
 }
 
+// postJSONWithHeader is postJSON plus one extra request header. Used by
+// the operator-side review CLI to forward operator identity via the same
+// trusted-header path the HTTP form uses (Cf-Access-Authenticated-User-Email),
+// so audit attribution is identical regardless of front door.
+func postJSONWithHeader(url string, request, response interface{}, headerName, headerValue string) error {
+	body, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if headerName != "" {
+		httpReq.Header.Set(headerName, headerValue)
+	}
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return decodeRemoteResponse(resp, response)
+}
+
 func getJSON(url string, response interface{}) error {
 	resp, err := http.Get(url)
 	if err != nil {

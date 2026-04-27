@@ -30,6 +30,10 @@ func main() {
 		cmdRemoteRun(os.Args[2:])
 	case "vault-fetch":
 		cmdVaultFetch(os.Args[2:])
+	case "request-upgrade":
+		cmdRequestUpgrade(os.Args[2:])
+	case "review-upgrades":
+		cmdReviewUpgrades(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
 	case "approve":
@@ -459,6 +463,8 @@ Commands:
   capbroker approve --server URL --key PATH [--watch]
   capbroker remote-run --server URL --agent AGENT --profile PROFILE --resource RESOURCE [--reason TEXT] -- COMMAND [ARGS...]
   capbroker vault-fetch --server URL --agent AGENT --profile PROFILE --ref REF [--field FIELD] [--reason TEXT]
+  capbroker request-upgrade --server URL --agent AGENT --target-profile PROFILE --target-resource VALUE --reason TEXT --grant-mode once|session|permanent
+  capbroker review-upgrades --server URL [--watch] [--operator IDENT]
   capbroker grants [--active=true]
   capbroker revoke --id GRANT_ID | --all
   capbroker auto-approve enable [--ttl 30m] [--idle-window 5m] [--reason TEXT]
