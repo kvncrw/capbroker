@@ -113,6 +113,19 @@ func runRequestUpgrade(server string, req Request, waitTimeout, pollInterval tim
 				fmt.Fprintln(os.Stderr, "capbroker: upgrade lease missing UpgradeGranted marker — refusing to claim grant")
 				return 1
 			}
+			// Lease must bind to the request we asked about. Without this
+			// check, a stale or replayed lease for a different agent /
+			// profile / resource would be accepted as a grant for OUR
+			// retry. Mirrors the same defense in runRemoteCommand /
+			// runVaultFetch.
+			if payload.Agent != req.Agent || payload.Profile != req.Profile || payload.Resource != req.Resource {
+				fmt.Fprintf(os.Stderr,
+					"capbroker: upgrade lease does not bind to this request (agent=%s profile=%s resource=%s vs lease agent=%s profile=%s resource=%s)\n",
+					req.Agent, req.Profile, req.Resource,
+					payload.Agent, payload.Profile, payload.Resource,
+				)
+				return 1
+			}
 			marker := "granted: " + payload.UpgradeGranted
 			fmt.Fprintf(os.Stderr, "capbroker: upgrade %s — retry the original command\n", marker)
 			fmt.Println(marker)

@@ -1,9 +1,8 @@
-#!/usr/bin/env bash
-# bash (not sh) because the 403-breadcrumb path uses process substitution
-# (`2> >(tee ...)`) to capture stderr while still letting the user see it.
-# That syntax is bash-only — under dash/ash this script would fail to
-# parse before reaching the kubectl call.
-set -euo pipefail
+#!/usr/bin/env sh
+# POSIX sh — works under dash/ash on minimal container images. The
+# 403-breadcrumb path captures stderr to a temp file and replays it
+# rather than using bash process substitution.
+set -eu
 
 server_file="${CAPBROKER_SERVER_FILE:-/opt/data/capbroker-server}"
 if [ -z "${CAPBROKER_SERVER:-}" ] && [ -f "$server_file" ]; then
@@ -43,8 +42,13 @@ denied_log="${CAPBROKER_DENIED_LOG:-/opt/data/capbroker-denied.jsonl}"
 target_profile="${CAPBROKER_PROFILE:-k8s-read}"
 target_resource="namespace/$namespace"
 
+# Capture stderr to a temp file so the 403-breadcrumb path can match
+# against it AFTER capbroker exits. We replay the full stderr to the
+# real fd 2 unconditionally so the user still sees the denial message
+# (just at exit instead of streaming). For a non-interactive wrapper
+# around kubectl this is fine — the wait is bounded.
 stderr_capture="$(mktemp)"
-trap 'rm -f "$stderr_capture"' EXIT
+trap 'rm -f "$stderr_capture"' EXIT INT TERM
 
 set +e
 # shellcheck disable=SC2086
@@ -54,16 +58,16 @@ capbroker remote-run \
   --resource "$target_resource" \
   --reason "$reason" \
   $ttl_args \
-  -- kubectl "$@" 2> >(tee "$stderr_capture" >&2)
+  -- kubectl "$@" 2>"$stderr_capture"
 status=$?
 set -e
+cat "$stderr_capture" >&2 2>/dev/null || true
 
 # On a 403-style denial, drop a structured breadcrumb the agent's next
 # wake handler can pick up to surface "you have outstanding capability
-# gaps". Best-effort throughout: a missing python3, missing log dir,
+# gaps". Best-effort throughout: missing python3, missing log dir,
 # unwritable log file, or any encoding hiccup must NEVER change the
-# exit code the caller sees — kubectl's denial is the meaningful
-# signal, the breadcrumb is the convenience.
+# exit code the caller sees.
 #
 # JSON encoding is delegated to python3 (json.dumps) so backslashes,
 # control characters, and embedded quotes in kubectl args (think
