@@ -5,8 +5,10 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -129,11 +131,12 @@ func TestUpgradeUIDiffShowsPermanentLine(t *testing.T) {
 func TestUpgradeUIFormPostApprovesAndPersistsGrant(t *testing.T) {
 	t.Parallel()
 	ts, server, req := httpUpgradeServer(t)
-	form := url.Values{"mode": {"once"}, "message": {"ok for this mission"}}
+	client, csrf := fetchCSRFForUpgrade(t, ts, req.ID)
+	form := url.Values{"mode": {"once"}, "message": {"ok for this mission"}, "csrf": {csrf}}
 	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/u/"+req.ID, strings.NewReader(form.Encode()))
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,11 +169,12 @@ func TestUpgradeUIFormPostApprovesAndPersistsGrant(t *testing.T) {
 func TestUpgradeUIFormPostDenyMarksDenied(t *testing.T) {
 	t.Parallel()
 	ts, server, req := httpUpgradeServer(t)
-	form := url.Values{"mode": {"deny"}, "message": {"scope too broad"}}
+	client, csrf := fetchCSRFForUpgrade(t, ts, req.ID)
+	form := url.Values{"mode": {"deny"}, "message": {"scope too broad"}, "csrf": {csrf}}
 	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/u/"+req.ID, strings.NewReader(form.Encode()))
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,11 +191,12 @@ func TestUpgradeUIFormPostDenyMarksDenied(t *testing.T) {
 func TestUpgradeUIFormPostBadModeShowsErrorPage(t *testing.T) {
 	t.Parallel()
 	ts, _, req := httpUpgradeServer(t)
-	form := url.Values{"mode": {"forever"}}
+	client, csrf := fetchCSRFForUpgrade(t, ts, req.ID)
+	form := url.Values{"mode": {"forever"}, "csrf": {csrf}}
 	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/u/"+req.ID, strings.NewReader(form.Encode()))
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,11 +399,12 @@ func TestUpgradeAPIAllowAnonymousModeAcceptsMissingHeader(t *testing.T) {
 func TestUpgradeUIFormPostRejectsUnauthorizedOperator(t *testing.T) {
 	t.Parallel()
 	ts, _, req := httpUpgradeServerWithAuthMode(t, []string{"kcrawley@web"}, false)
-	form := url.Values{"mode": {"once"}}
+	client, csrf := fetchCSRFForUpgrade(t, ts, req.ID)
+	form := url.Values{"mode": {"once"}, "csrf": {csrf}}
 	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/u/"+req.ID, strings.NewReader(form.Encode()))
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "attacker@evil")
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,6 +514,94 @@ func TestUpgradeAPIEmptyAllowlistSkipsSourceCheck(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 with empty allowlist, got %d", resp.StatusCode)
 	}
+}
+
+// --- CSRF tests ---
+//
+// Codex P1 (round 3 on PR #12) called out that a malicious page could
+// auto-POST `mode=permanent` against `/u/{id}` while the operator is
+// authenticated to Cloudflare Access — same-origin auth would carry
+// through. The double-submit-cookie pattern here defeats that: the
+// attacker can't read the operator's cookie cross-origin, so they
+// can't synthesize the matching hidden-input token.
+
+func TestUpgradeUIFormRejectsMissingCSRF(t *testing.T) {
+	t.Parallel()
+	ts, server, req := httpUpgradeServer(t)
+	form := url.Values{"mode": {"permanent"}}
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/u/"+req.ID, strings.NewReader(form.Encode()))
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
+	// No GET first → no cookie. Standard cross-site forgery shape.
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 on missing CSRF, got %d", resp.StatusCode)
+	}
+	got, _, _ := server.store.get(req.ID)
+	if got.Status != remoteStatusPending {
+		t.Fatalf("missing-CSRF POST should leave status pending, got %s", got.Status)
+	}
+	grants, _ := loadGrantsJSONL(permanentGrantsPath(server.stateDir))
+	if len(grants) != 0 {
+		t.Fatalf("missing-CSRF POST wrote a grant: %+v", grants)
+	}
+}
+
+func TestUpgradeUIFormRejectsForgedCSRF(t *testing.T) {
+	t.Parallel()
+	ts, _, req := httpUpgradeServer(t)
+	// Get a real cookie via GET, then submit a DIFFERENT value in the
+	// hidden input — simulates an attacker who can guess a previous
+	// session's cookie was set but can't read it.
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	if _, err := client.Get(ts.URL + "/u/" + req.ID); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"mode": {"permanent"}, "csrf": {"obviously-wrong"}}
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/u/"+req.ID, strings.NewReader(form.Encode()))
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Header.Set("Cf-Access-Authenticated-User-Email", "kcrawley@web")
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 on forged CSRF, got %d", resp.StatusCode)
+	}
+}
+
+// fetchCSRFForUpgrade does the GET-then-POST handshake the form path
+// requires after the CSRF fix: hit /u/{id} with no header (the GET
+// renders the form regardless of auth-gate) to pick up the cookie +
+// hidden input value, then return both wrapped in a cookie-aware client
+// the caller can use to POST.
+func fetchCSRFForUpgrade(t *testing.T, ts *httptest.Server, id string) (*http.Client, string) {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+	resp, err := client.Get(ts.URL + "/u/" + id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+	// Pull `value="<token>"` out of the hidden input. The form uses
+	// `<input type="hidden" name="csrf" value="...">`.
+	re := regexp.MustCompile(`name="csrf"\s+value="([^"]+)"`)
+	m := re.FindStringSubmatch(body)
+	if len(m) < 2 {
+		t.Fatalf("CSRF token not found in form: %s", body)
+	}
+	return client, m[1]
 }
 
 func readBody(t *testing.T, resp *http.Response) string {

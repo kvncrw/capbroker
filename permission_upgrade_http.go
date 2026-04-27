@@ -135,6 +135,51 @@ func (s *capbrokerServer) checkUpgradeSourceAllowed(r *http.Request) error {
 	return fmt.Errorf("source IP %s is not in remote.upgrade_allowed_sources", ip)
 }
 
+// upgradeCSRFCookie is the cookie name used by the double-submit CSRF
+// pattern on the HTML form. The same value lives in a hidden form input;
+// on POST we require both to be present and equal.
+const upgradeCSRFCookie = "_cb_upgrade_csrf"
+
+// issueUpgradeCSRFToken sets a fresh random cookie for the per-request
+// approval form. Same value is rendered as a hidden input. Safe to call
+// from any HTML GET handler — overwrites any prior token (the form is
+// short-lived and there's no concurrent submission).
+func (s *capbrokerServer) issueUpgradeCSRFToken(w http.ResponseWriter, r *http.Request) string {
+	token := randomHex(16)
+	http.SetCookie(w, &http.Cookie{
+		Name:     upgradeCSRFCookie,
+		Value:    token,
+		Path:     "/u/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+	})
+	return token
+}
+
+// verifyUpgradeCSRF enforces the double-submit cookie pattern. The form
+// POST must include the same token in BOTH the cookie and the hidden
+// input. Cross-origin attackers can't read the cookie (SameSite=Strict
+// blocks the cookie from being sent on cross-site form-POSTs anyway,
+// belt-and-suspenders), so they can't synthesize the matching field.
+//
+// Also requires the request method to be POST and rejects empty-token
+// matches so a missing cookie doesn't accidentally satisfy "they're equal".
+func verifyUpgradeCSRF(r *http.Request) error {
+	cookie, err := r.Cookie(upgradeCSRFCookie)
+	if err != nil || cookie == nil || cookie.Value == "" {
+		return fmt.Errorf("missing %s cookie — load the form via GET first", upgradeCSRFCookie)
+	}
+	form := strings.TrimSpace(r.PostFormValue("csrf"))
+	if form == "" {
+		return fmt.Errorf("missing csrf form field")
+	}
+	if cookie.Value != form {
+		return fmt.Errorf("csrf token mismatch")
+	}
+	return nil
+}
+
 // recordUnauthorizedUpgrade audits a rejected decision attempt so the
 // operator has a record of attempted self-approvals. Best-effort — audit
 // failures don't block the rejection.
@@ -241,12 +286,14 @@ func (s *capbrokerServer) handleUpgradeShow(w http.ResponseWriter, r *http.Reque
 		http.NotFound(w, r)
 		return
 	}
+	csrf := s.issueUpgradeCSRFToken(w, r)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	data := struct {
 		R       RemoteRequest
 		Now     time.Time
 		Decided bool
-	}{R: req, Now: time.Now().UTC(), Decided: req.Status != remoteStatusPending}
+		CSRF    string
+	}{R: req, Now: time.Now().UTC(), Decided: req.Status != remoteStatusPending, CSRF: csrf}
 	if err := upgradeFormTemplate.Execute(w, data); err != nil {
 		fmt.Fprintf(w, "<!-- template error: %v -->", err)
 	}
@@ -298,6 +345,17 @@ func (s *capbrokerServer) handleUpgradeDiff(w http.ResponseWriter, r *http.Reque
 func (s *capbrokerServer) handleUpgradeDecideForm(w http.ResponseWriter, r *http.Request, id string) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// CSRF check FIRST — before any audit/identity work — so a forged
+	// cross-site POST never reaches decidePermissionUpgrade. The
+	// double-submit cookie is set by handleUpgradeShow on the GET, so a
+	// real browser session has it; an attacker page can't read it (and
+	// SameSite=Strict blocks it from being sent on cross-site form
+	// posts anyway).
+	if err := verifyUpgradeCSRF(r); err != nil {
+		s.recordUnauthorizedUpgrade(id, "csrf-fail", r, err)
+		http.Error(w, "csrf check failed: "+err.Error(), http.StatusForbidden)
 		return
 	}
 	mode := strings.TrimSpace(r.PostFormValue("mode"))
@@ -422,6 +480,7 @@ var upgradeFormTemplate = template.Must(template.New("form").Parse(`<!doctype ht
 {{else}}
   <p><a href="/u/{{.R.ID}}/diff">view exact diff this would apply →</a></p>
   <form method="post" action="/u/{{.R.ID}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
     <fieldset>
       <label>note (optional) — included in audit:</label>
       <textarea name="message" rows="2" placeholder="e.g. ok for this mission only"></textarea>
