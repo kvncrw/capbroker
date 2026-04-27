@@ -63,15 +63,41 @@ set -e
 # gaps". Cheap to skip if disabled (CAPBROKER_DENIED_LOG=/dev/null) or
 # if the directory doesn't exist (we don't auto-create — agents in
 # transient pods shouldn't accumulate state).
+#
+# JSON encoding is delegated to python3 (json.dumps) so backslashes,
+# control characters, and embedded quotes in kubectl args (think
+# JSONPath like `-o jsonpath='{.spec.containers[0].image}'`) don't
+# corrupt the breadcrumb. argv comes in via env to avoid a separate
+# escape pass on the bash side; stderr message goes the same way.
 if [ "$status" -ne 0 ] && grep -q 'is not allowed for profile' "$stderr_capture"; then
   log_dir="$(dirname "$denied_log")"
   if [ -d "$log_dir" ]; then
-    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    msg="$(grep 'is not allowed for profile' "$stderr_capture" | head -1 | sed 's/"/\\"/g')"
-    printf '{"ts":"%s","agent":"%s","target_profile":"%s","target_resource":"%s","argv":"kubectl %s","stderr":"%s"}\n' \
-      "$ts" "${CAPBROKER_AGENT:-remote-agent}" "$target_profile" "$target_resource" \
-      "$(printf '%s ' "$@" | sed 's/"/\\"/g')" "$msg" \
-      >> "$denied_log" 2>/dev/null || true
+    msg="$(grep 'is not allowed for profile' "$stderr_capture" | head -1)"
+    line=$(
+      CAPBROKER_DENIED_AGENT="${CAPBROKER_AGENT:-remote-agent}" \
+      CAPBROKER_DENIED_PROFILE="$target_profile" \
+      CAPBROKER_DENIED_RESOURCE="$target_resource" \
+      CAPBROKER_DENIED_STDERR="$msg" \
+      CAPBROKER_DENIED_ARGV_JSON="$(printf '%s\0' "$@" | python3 -c '
+import json, os, sys
+items = sys.stdin.buffer.read().split(b"\0")
+items = [b.decode("utf-8", "replace") for b in items if b]
+print(json.dumps(["kubectl", *items]))
+')" \
+      python3 -c '
+import json, os
+from datetime import datetime, timezone
+print(json.dumps({
+    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "agent": os.environ["CAPBROKER_DENIED_AGENT"],
+    "target_profile": os.environ["CAPBROKER_DENIED_PROFILE"],
+    "target_resource": os.environ["CAPBROKER_DENIED_RESOURCE"],
+    "argv": json.loads(os.environ["CAPBROKER_DENIED_ARGV_JSON"]),
+    "stderr": os.environ["CAPBROKER_DENIED_STDERR"],
+}))
+'
+    )
+    printf '%s\n' "$line" >> "$denied_log" 2>/dev/null || true
   fi
 fi
 
