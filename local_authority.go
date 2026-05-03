@@ -31,6 +31,10 @@ func (s *capbrokerServer) localDecideRequest(remoteReq RemoteRequest) {
 		_ = profile // validation already verified the meta-profile
 		return
 	}
+	if !profile.RequireApproval {
+		s.localApproveRequest(remoteReq, profile, "approved by policy")
+		return
+	}
 	sessionTTL := requestedSessionTTL(s.cfg, profile, req)
 	critical := requestIsCritical(profile, req)
 	if !critical {
