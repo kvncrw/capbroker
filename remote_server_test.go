@@ -201,6 +201,149 @@ func TestRemoteServerVaultFetchFlow(t *testing.T) {
 	}
 }
 
+func TestLocalApproveHonorsNoApprovalProfile(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{
+		Profiles: map[string]Profile{
+			"github-review": {
+				Agents:          []string{"hermes"},
+				Resources:       []string{"kvncrw/homelab"},
+				TTLSeconds:      60,
+				RequireApproval: false,
+				AllowedCommands: [][]string{{"gh", "repo", "view"}},
+			},
+		},
+	}
+	server := capbrokerServer{
+		cfg:          cfg,
+		stateDir:     t.TempDir(),
+		store:        newRemoteStore(t.TempDir()),
+		localApprove: true,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/requests", server.handleRequests)
+	mux.HandleFunc("/v1/requests/", server.handleRequestByID)
+
+	clientPriv, clientPub, err := generateLeaseRecipientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created RemoteRequest
+	if err := performJSON(mux, http.MethodPost, "/v1/requests", RemoteRequestCreate{
+		Agent:           "hermes",
+		Profile:         "github-review",
+		Resource:        "kvncrw/homelab",
+		Reason:          "read GitOps repo",
+		Command:         []string{"gh", "repo", "view", "kvncrw/homelab"},
+		ClientPublicKey: clientPub,
+	}, &created); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var approved RemoteRequest
+	for time.Now().Before(deadline) {
+		var got RemoteRequest
+		if err := performJSON(mux, http.MethodGet, "/v1/requests/"+url.PathEscape(created.ID), nil, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != remoteStatusPending {
+			approved = got
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if approved.Status != remoteStatusApproved {
+		t.Fatalf("expected approved, got %s (message=%s)", approved.Status, approved.Message)
+	}
+	if approved.Message != "approved by policy" {
+		t.Fatalf("unexpected approval message %q", approved.Message)
+	}
+	if approved.EncryptedLease == nil {
+		t.Fatal("expected encrypted lease")
+	}
+	payload, err := decryptLease(clientPriv, *approved.EncryptedLease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Agent != "hermes" || payload.Profile != "github-review" || payload.Resource != "kvncrw/homelab" {
+		t.Fatalf("unexpected lease payload: %+v", payload)
+	}
+}
+
+func TestApprovePendingHonorsNoApprovalProfile(t *testing.T) {
+	t.Parallel()
+	keyPath := t.TempDir() + "/approver.key"
+	keyFile, err := writeApproverKey("local-authority", keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, privateKey, err := readApproverKey(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		Profiles: map[string]Profile{
+			"github-review": {
+				Agents:          []string{"hermes"},
+				Resources:       []string{"kvncrw/homelab"},
+				TTLSeconds:      60,
+				RequireApproval: false,
+				AllowedCommands: [][]string{{"gh", "repo", "view"}},
+			},
+		},
+	}
+	server := capbrokerServer{
+		cfg:                   cfg,
+		stateDir:              t.TempDir(),
+		store:                 newRemoteStore(t.TempDir()),
+		allowUnsignedDecision: true,
+		localApprove:          false,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/requests", server.handleRequests)
+	mux.HandleFunc("/v1/requests/", server.handleRequestByID)
+	httpServer := httptest.NewServer(mux)
+	defer httpServer.Close()
+
+	clientPriv, clientPub, err := generateLeaseRecipientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created RemoteRequest
+	if err := postJSON(remoteURL(httpServer.URL, "/v1/requests"), RemoteRequestCreate{
+		Agent:           "hermes",
+		Profile:         "github-review",
+		Resource:        "kvncrw/homelab",
+		Reason:          "read GitOps repo",
+		Command:         []string{"gh", "repo", "view", "kvncrw/homelab"},
+		ClientPublicKey: clientPub,
+	}, &created); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := approvePendingOnce(cfg, httpServer.URL, keyFile, privateKey); err != nil {
+		t.Fatal(err)
+	}
+	var approved RemoteRequest
+	if err := getJSON(remoteURL(httpServer.URL, "/v1/requests/"+url.PathEscape(created.ID)), &approved); err != nil {
+		t.Fatal(err)
+	}
+	if approved.Status != remoteStatusApproved {
+		t.Fatalf("expected approved, got %s (message=%s)", approved.Status, approved.Message)
+	}
+	if approved.EncryptedLease == nil {
+		t.Fatal("expected encrypted lease")
+	}
+	payload, err := decryptLease(clientPriv, *approved.EncryptedLease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Agent != "hermes" || payload.Profile != "github-review" || payload.Resource != "kvncrw/homelab" {
+		t.Fatalf("unexpected lease payload: %+v", payload)
+	}
+}
+
 func TestPermissionUpgradeRequestPersistsAllFields(t *testing.T) {
 	t.Parallel()
 	// Regression for the createRequest constructor losing target_profile,
